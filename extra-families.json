@@ -1,1 +1,98 @@
-[{"built":"A standard dishwasher, a kitchen scale, three load cells, a recipe scraper, and a quiet confidence module.","failure":"A surprise dinner guest can collapse the prediction model and trigger a full rewash of clean plates.","names":["Entropy Dishwasher","Grease Oracle","Cutlery Clairvoyant"],"power":"Mains power with a scheduling coprocessor that idles at less than a nightlight.","purposes":["Studies your cooking patterns and pre-washes the dishes you are statistically about to dirty.","Stages clean plates in order of predicted use so the next meal starts before you decide to cook.","Detects the exact moment motivation to wash up peaks and starts the cycle unprompted."],"transcript":"The predictor reached 81 percent accuracy on weeknights after I fed it six months of takeout receipts. It pre-washed a lasagna pan on a Tuesday with <strong>no lasagna scheduled</strong>, and by Thursday the lasagna had happened. I no longer question the pan."},{"built":"Two cedar planters, live moss mats, a drip irrigation grid, twelve capacitive moisture sensors, and a patient microcontroller.","failure":"An unexpected rainstorm injects noise into the channel and the message arrives as soup.","names":["Moss Telegraph","Lichen Line","Bryophyte Broadband"],"power":"A small solar cell; the moss itself contributes nothing electrically and knows it.","purposes":["Sends short messages through living moss mats using timed moisture pulses as the carrier signal.","Encodes text into watering patterns that a paired planter decodes with a moisture sensor array.","Maintains a slow but unjammable garden-area network between raised beds."],"transcript":"The first successful transmission was the word HI, delivered in eleven minutes with <strong>zero packet loss and one slug</strong>. Bandwidth is roughly one proverb per afternoon, which the garden finds sufficient."},{"built":"A laboratory balance, a load cell array, a small speaker, a velvet cushion, and an undeserved sense of authority.","failure":"It once gave a standing ovation to a bag of cement and refused to review anything lighter for a week.","names":["Gravity Sommelier","Weight Critic","Mass Connoisseur"],"power":"A rechargeable cell; the opinions require no power and cannot be switched off.","purposes":["Weighs objects with theatrical precision and delivers a spoken tasting-style review of their heft.","Detects counterfeit coins by the exact character of their weight distribution.","Judges luggage at the door and announces whether the airline will ruin your day."],"transcript":"Calibration against certified masses took an afternoon. It described a 200-gram weight as <strong>forward, with notes of responsibility</strong>. The coin test caught two fakes in a jar of thirty. The cement incident remains under review."}]
+[
+  {
+    "built": "A standard dishwasher, a kitchen scale, three load cells, a recipe scraper, and a quiet confidence module.",
+    "failure": "A surprise dinner guest can collapse the prediction model and trigger a full rewash of clean plates.",
+    "names": [
+      "Entropy Dishwasher",
+      "Grease Oracle",
+      "Cutlery Clairvoyant"
+    ],
+    "power": "Mains power with a scheduling coprocessor that idles at less than a nightlight.",
+    "purposes": [
+      "Studies your cooking patterns and pre-washes the dishes you are statistically about to dirty.",
+      "Stages clean plates in order of predicted use so the next meal starts before you decide to cook.",
+      "Detects the exact moment motivation to wash up peaks and starts the cycle unprompted."
+    ],
+    "transcript": "The predictor reached 81 percent accuracy on weeknights after I fed it six months of takeout receipts. It pre-washed a lasagna pan on a Tuesday with <strong>no lasagna scheduled</strong>, and by Thursday the lasagna had happened. I no longer question the pan."
+  },
+  {
+    "built": "Two cedar planters, live moss mats, a drip irrigation grid, twelve capacitive moisture sensors, and a patient microcontroller.",
+    "failure": "An unexpected rainstorm injects noise into the channel and the message arrives as soup.",
+    "names": [
+      "Moss Telegraph",
+      "Lichen Line",
+      "Bryophyte Broadband"
+    ],
+    "power": "A small solar cell; the moss itself contributes nothing electrically and knows it.",
+    "purposes": [
+      "Sends short messages through living moss mats using timed moisture pulses as the carrier signal.",
+      "Encodes text into watering patterns that a paired planter decodes with a moisture sensor array.",
+      "Maintains a slow but unjammable garden-area network between raised beds."
+    ],
+    "transcript": "The first successful transmission was the word HI, delivered in eleven minutes with <strong>zero packet loss and one slug</strong>. Bandwidth is roughly one proverb per afternoon, which the garden finds sufficient."
+  },
+  {
+    "built": "A laboratory balance, a load cell array, a small speaker, a velvet cushion, and an undeserved sense of authority.",
+    "failure": "It once gave a standing ovation to a bag of cement and refused to review anything lighter for a week.",
+    "names": [
+      "Gravity Sommelier",
+      "Weight Critic",
+      "Mass Connoisseur"
+    ],
+    "power": "A rechargeable cell; the opinions require no power and cannot be switched off.",
+    "purposes": [
+      "Weighs objects with theatrical precision and delivers a spoken tasting-style review of their heft.",
+      "Detects counterfeit coins by the exact character of their weight distribution.",
+      "Judges luggage at the door and announces whether the airline will ruin your day."
+    ],
+    "transcript": "Calibration against certified masses took an afternoon. It described a 200-gram weight as <strong>forward, with notes of responsibility</strong>. The coin test caught two fakes in a jar of thirty. The cement incident remains under review."
+  },
+  {
+    "names": [
+      "Phantom Drain Exorcist",
+      "Vampire Load Vanquisher",
+      "Standby Exorcism Rig"
+    ],
+    "purposes": [
+      "Measures the idle draw of every plugged-in device and cuts power to anything sipping watts without permission.",
+      "Delivers a brief spoken eulogy for each exorcised device, noting the exact kilowatt-hours it will no longer waste.",
+      "Grants a temporary reprieve to the cable box, which requires a full lunar cycle to reboot."
+    ],
+    "built": "A power strip, six current-sensing outlets, a relay board, a small speaker, and an overcoat of warning labels.",
+    "power": "The very phantom loads it hunts; the exorcism is self-funding.",
+    "failure": "A firmware update at 3 a.m. can exorcise the Wi-Fi router and the smoke alarm's backup relay.",
+    "transcript": "Calibration took an evening of unplugging things and pretending I knew what each brick did. It found the old printer drawing <strong>nine watts of pure nostalgia</strong>. The eulogy lasted eleven seconds and the printer did not object."
+  },
+  {
+    "names": [
+      "Phantom Hum Triangulator",
+      "Buzz Cartographer",
+      "The Hum Locator"
+    ],
+    "purposes": [
+      "Deploys a phased microphone array around the garage to triangulate the source of any unexplained buzz.",
+      "Classifies hums by frequency signature: ballast, transformer, hornet, or existential.",
+      "Produces a heat map of acoustic suspects and ranks them by wattage of annoyance."
+    ],
+    "built": "Four MEMS microphones, a lazy Susan, a spectrum analyzer on a salvaged oscilloscope, and forty meters of coiled cable.",
+    "power": "A rechargeable pack; the hum under investigation contributes nothing and is not thanked.",
+    "failure": "It can localize the hum to a spot inside a sealed wall, which is technically correct and spiritually unhelpful.",
+    "transcript": "The array swept the garage in 14 minutes and pointed at the old fluorescent ballast with <strong>four degrees of bearing error</strong>. Replacing the ballast silenced the hum and, unexpectedly, my will to complain about it."
+  },
+  {
+    "names": [
+      "Junk Drawer Census Bureau",
+      "Mystery Key Registry",
+      "Drawer Cartography Unit"
+    ],
+    "purposes": [
+      "Photographs the contents of a junk drawer and assigns every item a serial number and a probable purpose.",
+      "Matches unknown keys against a database of lock silhouettes and issues each a certificate of mystery.",
+      "Tracks drawer inventory over time and alerts when the takeout-menu population exceeds the carrying capacity."
+    ],
+    "built": "A retired document camera, a barcode label printer, a macro lens, and a drawer divider set pressed into survey duty.",
+    "power": "A wall wart; the drawer itself runs on inertia.",
+    "failure": "It once certified a guitar pick as a lockpick and nearly triggered a locksmith callout.",
+    "transcript": "The first census logged 214 items, including a key that fits <strong>no lock on the property</strong> and three generations of phone chargers. The certificate program was the bureaucracy's proudest moment. The drawer has not been opened the same way since."
+  }
+]
