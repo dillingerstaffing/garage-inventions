@@ -705,19 +705,16 @@
      INIT
      ============================================================ */
   function init() {
-    buildSignalsPanel();
-    buildChallengeBox();
-    addDossierButtons();
-    buildVaultSection();
-    hookInventionChanges();
-    refreshSignals();
+    var steps = [buildSignalsPanel, buildChallengeBox, addDossierButtons, buildVaultSection, hookInventionChanges, refreshSignals];
+    for (var i = 0; i < steps.length; i++) {
+      try { steps[i](); } catch (e) { if (window.console && console.warn) console.warn("garage feature failed", e); }
+    }
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
   }
-})();
 
   /* ============================================================
      8. THE CRUCIBLE: reactor stability trial (playable)
@@ -989,3 +986,4 @@
   } else {
     buildCrucible();
   }
+})();
