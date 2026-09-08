@@ -986,4 +986,494 @@
   } else {
     buildCrucible();
   }
+
+  /* ============================================================
+     8. WIRE THE PROTOTYPE (circuit puzzle bench)
+     Real machinery: a solvable-by-construction pipe puzzle on canvas.
+     Tap tiles to rotate them and link the battery to the invention
+     before the capacitor charge runs out. Win stamps the dossier and
+     unlocks a downloadable wiring certificate. Lose shorts the board.
+     ============================================================ */
+  var WP = {
+    DX: { 1: 0, 2: 1, 4: 0, 8: -1 },
+    DY: { 1: -1, 2: 0, 4: 1, 8: 0 },
+    OPP: { 1: 4, 2: 8, 4: 1, 8: 2 },
+    BASE: { I: 10, L: 3, T: 11, X: 15, SRC: 2, SNK: 8 }
+  };
+  var WP_LEVEL = 1;
+  var wpg = null;
+
+  function wpRot(mask, r) {
+    r = r & 3;
+    return ((mask << r) | (mask >> (4 - r))) & 15;
+  }
+  function wpBit(dx, dy) {
+    if (dx === 1) return 2;
+    if (dx === -1) return 8;
+    if (dy === 1) return 4;
+    return 1;
+  }
+  function wpMaskOf(cell) {
+    return wpRot(WP.BASE[cell.type], cell.rot);
+  }
+
+  function wpFindPath(n, sy, ey) {
+    function k(x, y) { return y * n + x; }
+    var path = [[0, sy]], seen = {};
+    seen[k(0, sy)] = 1;
+    var guard = 0;
+    while (path.length && guard < 4000) {
+      guard++;
+      var last = path[path.length - 1];
+      if (last[0] === n - 1 && last[1] === ey) return path;
+      var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (var i = dirs.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var t = dirs[i]; dirs[i] = dirs[j]; dirs[j] = t;
+      }
+      var moved = false;
+      for (var d = 0; d < 4; d++) {
+        var nx = last[0] + dirs[d][0], ny = last[1] + dirs[d][1];
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        if (seen[k(nx, ny)]) continue;
+        path.push([nx, ny]); seen[k(nx, ny)] = 1; moved = true; break;
+      }
+      if (!moved) { var p = path.pop(); delete seen[k(p[0], p[1])]; }
+    }
+    return null;
+  }
+
+  function wpSolved(cells, n, snkIdx) {
+    var seen = {}, q = [];
+    var start = -1;
+    for (var s = 0; s < n * n; s++) if (cells[s].type === "SRC") { start = s; break; }
+    if (start < 0) return { ok: false, set: seen };
+    seen[start] = 1; q.push(start);
+    var dirs = [1, 2, 4, 8];
+    while (q.length) {
+      var i = q.pop(), x = i % n, y = (i / n) | 0;
+      var mask = wpMaskOf(cells[i]);
+      for (var a = 0; a < 4; a++) {
+        var d = dirs[a];
+        if (!(mask & d)) continue;
+        var nx = x + WP.DX[d], ny = y + WP.DY[d];
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        var j = ny * n + nx;
+        if (!(wpMaskOf(cells[j]) & WP.OPP[d])) continue;
+        if (!seen[j]) { seen[j] = 1; q.push(j); }
+      }
+    }
+    return { ok: !!seen[snkIdx], set: seen };
+  }
+
+  function wpNewBoard(level) {
+    wpStopTick();
+    var n = 4 + level, sy = Math.floor(Math.random() * n), ey = Math.floor(Math.random() * n);
+    var path = null, tries = 0;
+    while (!path && tries < 60) {
+      tries++;
+      var cand = wpFindPath(n, sy, ey);
+      if (!cand || cand.length < 3) continue;
+      var p1 = cand[1], pn = cand[cand.length - 2];
+      if (p1[0] === 1 && p1[1] === sy && pn[0] === n - 2 && pn[1] === ey) path = cand;
+    }
+    if (!path) {
+      path = [];
+      for (var fx = 0; fx <= n - 2; fx++) path.push([fx, sy]);
+      var step = ey > sy ? 1 : -1;
+      for (var fy = sy + step; step > 0 ? fy <= ey : fy >= ey; fy += step) path.push([n - 2, fy]);
+      path.push([n - 1, ey]);
+    }
+    var cells = [];
+    for (var i = 0; i < n * n; i++) cells.push({ type: "X", rot: 0 });
+    var onPath = {}, interior = [];
+    path.forEach(function (p, idx) {
+      var x = p[0], y = p[1], ci = y * n + x;
+      onPath[ci] = 1;
+      if (idx === 0) { cells[ci] = { type: "SRC", rot: 0, fixed: true }; return; }
+      if (idx === path.length - 1) { cells[ci] = { type: "SNK", rot: 0, fixed: true }; return; }
+      var a = path[idx - 1], b = path[idx + 1];
+      var need = wpBit(a[0] - x, a[1] - y) | wpBit(b[0] - x, b[1] - y);
+      var done = false;
+      ["I", "L"].forEach(function (tp) {
+        if (done) return;
+        for (var r = 0; r < 4; r++) {
+          if (wpRot(WP.BASE[tp], r) === need) { cells[ci] = { type: tp, rot: r }; done = true; break; }
+        }
+      });
+      interior.push(ci);
+    });
+    var noise = ["I", "L", "T", "X"];
+    for (var q = 0; q < n * n; q++) {
+      if (onPath[q]) continue;
+      cells[q] = { type: noise[Math.floor(Math.random() * noise.length)], rot: Math.floor(Math.random() * 4) };
+    }
+    interior.forEach(function (ci) {
+      cells[ci].rot = (cells[ci].rot + 1 + Math.floor(Math.random() * 3)) % 4;
+    });
+    var snk = path[path.length - 1], snkIdx = snk[1] * n + snk[0];
+    var guard = 0;
+    while (wpSolved(cells, n, snkIdx).ok && guard < 80) {
+      var ci2 = interior[Math.floor(Math.random() * interior.length)];
+      cells[ci2].rot = (cells[ci2].rot + 1) % 4;
+      guard++;
+    }
+    var pathLen = Math.max(1, path.length - 2);
+    var full = Math.max(100, 60 + 8 * pathLen);
+    wpg = {
+      n: n, cells: cells, level: level, snkIdx: snkIdx,
+      charge: full, maxCharge: full, moves: 0, elapsed: 0,
+      running: true, won: false, lost: false, par: pathLen, timer: null
+    };
+    $("wpResult").style.display = "none";
+    $("wpCertBtn").disabled = true;
+    wpStartTick();
+    wpHUD();
+    wpDraw();
+  }
+
+  function wpStartTick() {
+    if (!wpg || wpg.timer) return;
+    wpg.timer = setInterval(function () {
+      if (!wpg || !wpg.running) return;
+      if (!$("wpOverlay") || !$("wpOverlay").classList.contains("open")) return;
+      wpg.elapsed += 0.2;
+      wpg.charge -= 0.1;
+      if (wpg.charge <= 0) { wpFail(); return; }
+      wpHUD();
+    }, 200);
+  }
+  function wpStopTick() {
+    if (wpg && wpg.timer) { clearInterval(wpg.timer); wpg.timer = null; }
+  }
+
+  function wpChargeColor() {
+    var f = wpg.charge / wpg.maxCharge;
+    return f > 0.5 ? "#c7ff38" : f > 0.25 ? "#ff6b2c" : "#ff4668";
+  }
+  function wpFmtTime(s) {
+    s = Math.floor(s);
+    return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
+  }
+  function wpBest() {
+    try { return JSON.parse(localStorage.getItem("garage_wire_best_v1") || "{}"); }
+    catch (e) { return {}; }
+  }
+  function wpHUD() {
+    if (!wpg) return;
+    var fill = $("wpChargeFill"), txt = $("wpChargeTxt");
+    var pct = Math.max(0, Math.round(100 * wpg.charge / wpg.maxCharge));
+    fill.style.width = pct + "%";
+    fill.style.background = wpChargeColor();
+    txt.textContent = pct + "% charge";
+    $("wpMoves").textContent = wpg.moves + " moves";
+    $("wpTime").textContent = wpFmtTime(wpg.elapsed);
+    $("wpPar").textContent = "par " + wpg.par;
+    var b = wpBest()[wpg.level];
+    $("wpBest").textContent = b ? ("best " + b.moves + " moves") : "no best yet";
+  }
+
+  function wpDraw() {
+    var cv = $("wpCanvas");
+    if (!cv || !wpg) return;
+    var ctx = cv.getContext("2d"), S = 640, n = wpg.n, cell = S / n;
+    ctx.fillStyle = "#060b0c";
+    ctx.fillRect(0, 0, S, S);
+    var sol = wpSolved(wpg.cells, n, wpg.snkIdx), en = sol.set;
+    var lw = Math.max(4, cell * 0.14);
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        var ci = y * n + x, c = wpg.cells[ci];
+        var cx = x * cell + cell / 2, cy = y * cell + cell / 2;
+        ctx.fillStyle = ((x + y) % 2) ? "#0a1214" : "#0c1618";
+        ctx.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+        var hot = !!en[ci];
+        if (c.type === "SRC") {
+          ctx.fillStyle = "#ff6b2c";
+          ctx.fillRect(cx - cell * 0.26, cy - cell * 0.26, cell * 0.52, cell * 0.52);
+          ctx.fillStyle = "#0a1416";
+          ctx.font = "700 " + Math.round(cell * 0.4) + "px monospace";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("+", cx, cy + 1);
+          ctx.fillStyle = "#ff6b2c";
+          ctx.fillRect(cx + cell * 0.26, cy - cell * 0.1, cell * 0.12, cell * 0.2);
+        } else if (c.type === "SNK") {
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = hot ? "#c7ff38" : "#58e4e8";
+          if (hot) { ctx.shadowColor = "#c7ff38"; ctx.shadowBlur = 18; }
+          ctx.beginPath(); ctx.arc(cx, cy, cell * 0.3, 0, Math.PI * 2); ctx.stroke();
+          ctx.shadowBlur = 0;
+          if (hot) {
+            ctx.fillStyle = "#c7ff38";
+            ctx.beginPath(); ctx.arc(cx, cy, cell * 0.16, 0, Math.PI * 2); ctx.fill();
+          } else {
+            ctx.fillStyle = "#58e4e8";
+            ctx.font = "600 " + Math.round(cell * 0.22) + "px monospace";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText("OUT", cx, cy + 1);
+          }
+        } else {
+          var mask = wpMaskOf(c);
+          ctx.strokeStyle = hot ? "#c7ff38" : "#7e4419";
+          ctx.lineWidth = lw;
+          ctx.lineCap = "round";
+          if (hot) { ctx.shadowColor = "#c7ff38"; ctx.shadowBlur = 12; }
+          [1, 2, 4, 8].forEach(function (d) {
+            if (!(mask & d)) return;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + WP.DX[d] * cell / 2, cy + WP.DY[d] * cell / 2);
+            ctx.stroke();
+          });
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = hot ? "#c7ff38" : "#7e4419";
+          ctx.beginPath(); ctx.arc(cx, cy, lw * 0.55, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+    ctx.strokeStyle = "#1d2b29";
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= n; g++) {
+      ctx.beginPath(); ctx.moveTo(g * cell, 0); ctx.lineTo(g * cell, S); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, g * cell); ctx.lineTo(S, g * cell); ctx.stroke();
+    }
+    if (wpg.lost) {
+      ctx.fillStyle = "rgba(4,8,8,.55)";
+      ctx.fillRect(0, 0, S, S);
+    }
+  }
+
+  function wpShowResult(win) {
+    var r = $("wpResult");
+    r.style.display = "block";
+    r.className = "wp-result " + (win ? "win" : "lose");
+    var stats = "Level " + wpg.level + " (" + wpg.n + "x" + wpg.n + "), " +
+      wpg.moves + " moves, " + wpFmtTime(wpg.elapsed) +
+      (win ? ", " + Math.max(0, Math.round(100 * wpg.charge / wpg.maxCharge)) + "% charge left" : "");
+    if (win) {
+      var b = wpBest()[wpg.level];
+      var note = b ? "Best on this level: " + b.moves + " moves." : "First clear on this level. The bench remembers.";
+      r.innerHTML = "<strong>WIRED.</strong> Current flows from battery to invention. " + esc(stats) + ". " + esc(note);
+    } else {
+      r.innerHTML = "<strong>SHORTED OUT.</strong> The capacitor died before the circuit closed. Hit New board and wire it cleaner.";
+    }
+  }
+
+  function wpSaveBest() {
+    try {
+      var all = wpBest(), cur = all[wpg.level];
+      if (!cur || wpg.moves < cur.moves) {
+        all[wpg.level] = { moves: wpg.moves, secs: Math.round(wpg.elapsed) };
+        localStorage.setItem("garage_wire_best_v1", JSON.stringify(all));
+      }
+    } catch (e) { /* storage unavailable, play on */ }
+  }
+
+  function wpStampRow(nm, code) {
+    var specs = document.querySelector(".dossier .specs");
+    if (!specs) return;
+    var row = $("wpCertRow");
+    if (!row) {
+      row = el("div", "spec");
+      row.id = "wpCertRow";
+      specs.appendChild(row);
+    }
+    row.innerHTML = "<dt>Bench certification</dt><dd>" + esc("wired live: level " + wpg.level + ", " + wpg.moves + " moves, " + wpFmtTime(wpg.elapsed)) + "</dd>";
+    void nm; void code;
+  }
+
+  function wpWin() {
+    wpg.running = false; wpg.won = true;
+    wpStopTick();
+    var v = (typeof currentInvention === "function") ? currentInvention() : null;
+    var nm = v ? v.name : "unnamed prototype";
+    window.__wiredCert = "bench-wired (" + nm + ") " + new Date().toISOString().slice(0, 10);
+    wpStampRow(nm, v ? v.code : "");
+    wpSaveBest();
+    $("wpCertBtn").disabled = false;
+    wpShowResult(true);
+    wpHUD();
+    wpDraw();
+    toast("WIRED. The prototype is live.");
+  }
+
+  function wpFail() {
+    if (!wpg || !wpg.running) return;
+    wpg.running = false; wpg.lost = true; wpg.charge = 0;
+    wpStopTick();
+    wpShowResult(false);
+    wpHUD();
+    wpDraw();
+    toast("Shorted out. The capacitor is dead.");
+  }
+
+  function wpGlyph(type, rot) {
+    if (type === "SRC") return ">";
+    if (type === "SNK") return "O";
+    var g = {
+      "I0": "-", "I1": "|", "I2": "-", "I3": "|",
+      "L0": "L", "L1": "r", "L2": "7", "L3": "J",
+      "T0": "v", "T1": ">", "T2": "^", "T3": "<",
+      "X0": "+", "X1": "+", "X2": "+", "X3": "+"
+    };
+    return g[type + rot] || "?";
+  }
+
+  function wpCertificate() {
+    if (!wpg || !wpg.won) return;
+    var v = (typeof currentInvention === "function") ? currentInvention() : null;
+    var nm = v ? v.name : "unnamed prototype";
+    var code = v ? v.code : "n/a";
+    var rows = [];
+    for (var y = 0; y < wpg.n; y++) {
+      var line = "";
+      for (var x = 0; x < wpg.n; x++) {
+        var c = wpg.cells[y * wpg.n + x];
+        line += wpGlyph(c.type, c.rot) + " ";
+      }
+      rows.push(line.replace(/ $/, ""));
+    }
+    var txt =
+      "WIRING CERTIFICATE\n" +
+      "Garage Inventions Bench Trials\n" +
+      "================================\n" +
+      "Invention : " + nm + " (" + code + ")\n" +
+      "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Level     : " + wpg.level + " (" + wpg.n + "x" + wpg.n + " board)\n" +
+      "Result    : WIRED, current flowing\n" +
+      "Moves     : " + wpg.moves + " (par " + wpg.par + ")\n" +
+      "Time      : " + wpFmtTime(wpg.elapsed) + "\n" +
+      "Charge    : " + Math.max(0, Math.round(100 * wpg.charge / wpg.maxCharge)) + "% remaining\n" +
+      "\nFinal wiring (> battery, O invention):\n" +
+      rows.join("\n") + "\n" +
+      "\nCertified by the bench. Reality is optional. Utility is not.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "wiring-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    toast("Wiring certificate downloaded");
+  }
+
+  function wpOnCanvasTap(e) {
+    if (!wpg || !wpg.running) return;
+    var cv = $("wpCanvas"), rect = cv.getBoundingClientRect();
+    var px = (e.clientX - rect.left) * (640 / rect.width);
+    var py = (e.clientY - rect.top) * (640 / rect.height);
+    var n = wpg.n, cell = 640 / n;
+    var x = Math.floor(px / cell), y = Math.floor(py / cell);
+    if (x < 0 || y < 0 || x >= n || y >= n) return;
+    var c = wpg.cells[y * n + x];
+    if (c.fixed) { toast("That terminal is bolted down"); return; }
+    c.rot = (c.rot + 1) % 4;
+    wpg.moves++;
+    wpg.charge -= 2;
+    if (wpg.charge <= 0) { wpFail(); return; }
+    if (wpSolved(wpg.cells, n, wpg.snkIdx).ok) { wpWin(); return; }
+    wpHUD();
+    wpDraw();
+  }
+
+  function wpSetLevel(lv) {
+    WP_LEVEL = lv;
+    [1, 2, 3].forEach(function (l) {
+      var b = $("wpLv" + l);
+      if (b) b.classList.toggle("on", l === lv);
+    });
+    wpNewBoard(lv);
+  }
+
+  function wpOpen() {
+    var ov = $("wpOverlay");
+    if (!ov) return;
+    ov.classList.add("open");
+    if (!wpg) wpNewBoard(WP_LEVEL);
+    else if (wpg.running && !wpg.timer) wpStartTick();
+    wpHUD();
+    wpDraw();
+  }
+  function wpClose() {
+    var ov = $("wpOverlay");
+    if (ov) ov.classList.remove("open");
+  }
+
+  function wpBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || $("wireProtoBtn")) return;
+
+    var css = [
+      ".wp-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".wp-overlay.open{display:flex;}",
+      ".wp-panel{width:min(700px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--orange);padding:16px;}",
+      ".wp-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".wp-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+      ".wp-hud{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:10px;}",
+      ".wp-charge{display:flex;align-items:center;gap:10px;}",
+      ".wp-chargetrack{flex:1;height:14px;background:#101716;border:1px solid var(--line);}",
+      ".wp-chargefill{height:100%;width:100%;background:var(--acid);transition:width .2s;}",
+      ".wp-charge span{font-size:11px;color:var(--ink);white-space:nowrap;font-family:monospace;}",
+      ".wp-stats{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;font-family:monospace;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;}",
+      ".wp-levels{display:flex;gap:8px;align-items:center;font-size:11px;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;}",
+      ".wp-levels button{min-width:52px;min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;cursor:pointer;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);}",
+      ".wp-levels button.on{border-color:var(--orange);color:var(--orange);}",
+      "#wpCanvas{width:100%;height:auto;display:block;background:#060b0c;border:1px solid var(--line);touch-action:manipulation;cursor:pointer;}",
+      ".wp-result{display:none;margin-top:10px;padding:12px 14px;font-size:12px;line-height:1.6;border:1px solid;}",
+      ".wp-result.win{border-color:var(--acid);background:rgba(199,255,56,.06);color:var(--ink);}",
+      ".wp-result.win strong{color:var(--acid);}",
+      ".wp-result.lose{border-color:#ff4668;background:rgba(255,70,104,.06);color:var(--ink);}",
+      ".wp-result.lose strong{color:#ff4668;}",
+      ".wp-foot{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}",
+      ".wp-foot .secondary{flex:1;min-height:44px;}",
+      ".wp-foot .secondary:disabled{opacity:.35;cursor:not-allowed;}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = el("button", "secondary", "Wire the Prototype");
+    b.id = "wireProtoBtn";
+    b.addEventListener("click", wpOpen);
+    box.appendChild(b);
+
+    var ov = el("div", "wp-overlay");
+    ov.id = "wpOverlay";
+    ov.innerHTML =
+      '<div class="wp-panel" role="dialog" aria-label="Wire the prototype">' +
+      "<h3>Wire the Prototype</h3>" +
+      '<p class="wp-sub">Tap tiles to rotate them. Link the battery to the invention before the capacitor drains. Every rotation and every second costs charge.</p>' +
+      '<div class="wp-hud">' +
+      '<div class="wp-charge"><div class="wp-chargetrack"><div class="wp-chargefill" id="wpChargeFill"></div></div><span id="wpChargeTxt">100% charge</span></div>' +
+      '<div class="wp-stats"><span id="wpMoves">0 moves</span><span id="wpTime">0:00</span><span id="wpPar"></span><span id="wpBest"></span></div>' +
+      '<div class="wp-levels"><span>Bench level</span><button id="wpLv1" class="on">1</button><button id="wpLv2">2</button><button id="wpLv3">3</button></div>' +
+      "</div>" +
+      '<canvas id="wpCanvas" width="640" height="640"></canvas>' +
+      '<div class="wp-result" id="wpResult"></div>' +
+      '<div class="wp-foot">' +
+      '<button class="secondary" id="wpNew">New board</button>' +
+      '<button class="secondary" id="wpCertBtn" disabled>Download certificate</button>' +
+      '<button class="secondary" id="wpClose">Close</button>' +
+      "</div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    $("wpCanvas").addEventListener("click", wpOnCanvasTap);
+    $("wpNew").addEventListener("click", function () { wpNewBoard(WP_LEVEL); });
+    $("wpCertBtn").addEventListener("click", wpCertificate);
+    $("wpClose").addEventListener("click", wpClose);
+    ov.addEventListener("click", function (e) { if (e.target === ov) wpClose(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) wpClose();
+    });
+    [1, 2, 3].forEach(function (l) {
+      $("wpLv" + l).addEventListener("click", function () { wpSetLevel(l); });
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wpBuild);
+  } else {
+    wpBuild();
+  }
+
 })();
