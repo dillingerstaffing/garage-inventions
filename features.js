@@ -42,8 +42,9 @@
     ".vault-item .meta{font-size:10px;color:#7c8d89;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;}",
     ".vault-item .row{display:flex;gap:8px;flex-wrap:wrap;}",
     ".vault-empty{color:#72827f;font-size:12px;padding:8px 0;}",
-    ".dossier .actions{flex-wrap:wrap;}",
-    ".voice-row{display:flex;gap:8px;align-items:center;margin-top:10px;font-size:10px;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;}",
+    ".dossier .actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}",
+    ".dossier .actions .secondary{flex:none;min-width:0;white-space:normal;line-height:1.5;}",
+    ".voice-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;font-size:10px;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;}",
     ".voice-row select,.voice-row input{font:inherit;}",
     ".voice-row select{background:var(--black);border:1px solid var(--line);color:var(--ink);padding:6px;font-size:11px;max-width:180px;}",
     ".part-links a{color:var(--acid);text-decoration:none;border-bottom:1px dotted var(--acid);margin-right:10px;font-size:11px;line-height:2;}",
@@ -60,7 +61,7 @@
     "  body.printing #printSheet h2{font-size:13px;margin:18px 0 4px;text-transform:uppercase;letter-spacing:.1em;}",
     "  body.printing #printSheet p{font-size:13px;line-height:1.6;margin:0 0 6px;}",
     "}",
-    "@media (max-width:900px){.live-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}"
+    "@media (max-width:900px){.live-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.dossier .actions{grid-template-columns:repeat(2,minmax(0,1fr));}}"
   ].join("\n");
   var style = document.createElement("style");
   style.textContent = css;
