@@ -474,6 +474,54 @@
 
   <script>
     const inventions = [
+{
+  "built": "A standard dishwasher, a kitchen scale, three load cells, a recipe scraper, and a quiet confidence module.",
+  "failure": "A surprise dinner guest can collapse the prediction model and trigger a full rewash of clean plates.",
+  "names": [
+    "Entropy Dishwasher",
+    "Grease Oracle",
+    "Cutlery Clairvoyant"
+  ],
+  "power": "Mains power with a scheduling coprocessor that idles at less than a nightlight.",
+  "purposes": [
+    "Studies your cooking patterns and pre-washes the dishes you are statistically about to dirty.",
+    "Stages clean plates in order of predicted use so the next meal starts before you decide to cook.",
+    "Detects the exact moment motivation to wash up peaks and starts the cycle unprompted."
+  ],
+  "transcript": "The predictor reached 81 percent accuracy on weeknights after I fed it six months of takeout receipts. It pre-washed a lasagna pan on a Tuesday with <strong>no lasagna scheduled</strong>, and by Thursday the lasagna had happened. I no longer question the pan."
+},
+{
+  "built": "Two cedar planters, live moss mats, a drip irrigation grid, twelve capacitive moisture sensors, and a patient microcontroller.",
+  "failure": "An unexpected rainstorm injects noise into the channel and the message arrives as soup.",
+  "names": [
+    "Moss Telegraph",
+    "Lichen Line",
+    "Bryophyte Broadband"
+  ],
+  "power": "A small solar cell; the moss itself contributes nothing electrically and knows it.",
+  "purposes": [
+    "Sends short messages through living moss mats using timed moisture pulses as the carrier signal.",
+    "Encodes text into watering patterns that a paired planter decodes with a moisture sensor array.",
+    "Maintains a slow but unjammable garden-area network between raised beds."
+  ],
+  "transcript": "The first successful transmission was the word HI, delivered in eleven minutes with <strong>zero packet loss and one slug</strong>. Bandwidth is roughly one proverb per afternoon, which the garden finds sufficient."
+},
+{
+  "built": "A laboratory balance, a load cell array, a small speaker, a velvet cushion, and an undeserved sense of authority.",
+  "failure": "It once gave a standing ovation to a bag of cement and refused to review anything lighter for a week.",
+  "names": [
+    "Gravity Sommelier",
+    "Weight Critic",
+    "Mass Connoisseur"
+  ],
+  "power": "A rechargeable cell; the opinions require no power and cannot be switched off.",
+  "purposes": [
+    "Weighs objects with theatrical precision and delivers a spoken tasting-style review of their heft.",
+    "Detects counterfeit coins by the exact character of their weight distribution.",
+    "Judges luggage at the door and announces whether the airline will ruin your day."
+  ],
+  "transcript": "Calibration against certified masses took an afternoon. It described a 200-gram weight as <strong>forward, with notes of responsibility</strong>. The coin test caught two fakes in a jar of thirty. The cement incident remains under review."
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -999,6 +1047,7 @@
     if (live.moon && live.moon.new) out.push("new moon: light-pollution-free calibration run booked");
     if (live.timeOfDay === "deep night" || live.timeOfDay === "night") out.push("low-light operation assumed; running lights added");
     if (window.__dailyConstraint) out.push("daily constraint applied: " + window.__dailyConstraint);
+    if (window.__crucibleCert) out.push(window.__crucibleCert);
     return out;
   }
 
@@ -1453,6 +1502,277 @@
     init();
   }
 })();
+
+  /* ============================================================
+     8. THE CRUCIBLE: reactor stability trial (playable)
+     Keep the reaction needle inside the green band for 30 seconds.
+     Vent cools it down, stoke drives it up. Survive and the
+     invention earns a crucible-forged certification.
+     ============================================================ */
+  var crucible = null;
+
+  function buildCrucible() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || $("crucibleBtn")) return;
+    var css2 = [
+      ".crucible-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".crucible-overlay.open{display:flex;}",
+      ".crucible-panel{width:min(780px,100%);background:#0a1416;border:1px solid var(--cyan);padding:16px;}",
+      ".crucible-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".crucible-panel .sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;}",
+      ".crucible-panel canvas{width:100%;height:auto;display:block;background:#060b0c;border:1px solid var(--line);touch-action:none;}",
+      ".crucible-controls{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;}",
+      ".crucible-controls button{padding:18px;font-family:'Chakra Petch',sans-serif;font-size:15px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);user-select:none;-webkit-user-select:none;touch-action:none;}",
+      "#cruVent{border-color:var(--cyan);color:var(--cyan);}",
+      "#cruStoke{border-color:var(--orange);color:var(--orange);}",
+      ".crucible-controls button.held{background:rgba(88,228,232,.18);}",
+      ".crucible-foot{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}",
+      ".crucible-foot .secondary{flex:1;}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css2;
+    document.head.appendChild(st);
+
+    var b = el("button", "secondary", "Enter the Crucible");
+    b.id = "crucibleBtn";
+    b.addEventListener("click", openCrucible);
+    box.appendChild(b);
+
+    var ov = el("div", "crucible-overlay");
+    ov.id = "crucibleOverlay";
+    ov.innerHTML =
+      '<div class="crucible-panel" role="dialog" aria-label="The Crucible trial">' +
+      "<h3>The Crucible</h3>" +
+      '<p class="sub">Hold the needle in the green band for 30 seconds. Vent cools, stoke heats.</p>' +
+      '<canvas id="cruCanvas" width="720" height="460"></canvas>' +
+      '<div class="crucible-controls">' +
+      '<button id="cruVent">Vent</button>' +
+      '<button id="cruStoke">Stoke</button>' +
+      "</div>" +
+      '<div class="crucible-foot">' +
+      '<button class="secondary" id="cruRestart">Run it again</button>' +
+      '<button class="secondary" id="cruClose">Close</button>' +
+      "</div></div>";
+    document.body.appendChild(ov);
+
+    crucible = {
+      overlay: ov,
+      canvas: $("cruCanvas"),
+      running: false, won: false, lost: false,
+      stability: 55, integrity: 100, timeLeft: 30,
+      vent: false, stoke: false,
+      shockTimer: 2.5, shake: 0, particles: [], raf: 0, last: 0
+    };
+
+    var bindHold = function (id, key) {
+      var btn = $(id);
+      var on = function (e) { e.preventDefault(); crucible[key] = true; btn.classList.add("held"); };
+      var off = function () { crucible[key] = false; btn.classList.remove("held"); };
+      btn.addEventListener("pointerdown", on);
+      btn.addEventListener("pointerup", off);
+      btn.addEventListener("pointerleave", off);
+      btn.addEventListener("pointercancel", off);
+    };
+    bindHold("cruVent", "vent");
+    bindHold("cruStoke", "stoke");
+
+    document.addEventListener("keydown", function (e) {
+      if (!crucible.overlay.classList.contains("open")) return;
+      if (e.key === "ArrowLeft" || e.key === "a") crucible.vent = true;
+      if (e.key === "ArrowRight" || e.key === "d") crucible.stoke = true;
+    });
+    document.addEventListener("keyup", function (e) {
+      if (e.key === "ArrowLeft" || e.key === "a") crucible.vent = false;
+      if (e.key === "ArrowRight" || e.key === "d") crucible.stoke = false;
+    });
+
+    $("cruRestart").addEventListener("click", startCrucible);
+    $("cruClose").addEventListener("click", closeCrucible);
+  }
+
+  function openCrucible() {
+    crucible.overlay.classList.add("open");
+    startCrucible();
+  }
+  function closeCrucible() {
+    crucible.overlay.classList.remove("open");
+    crucible.running = false;
+    cancelAnimationFrame(crucible.raf);
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+  function startCrucible() {
+    crucible.running = true; crucible.won = false; crucible.lost = false;
+    crucible.stability = 55; crucible.integrity = 100; crucible.timeLeft = 30;
+    crucible.vent = false; crucible.stoke = false;
+    crucible.shockTimer = 2.5; crucible.shake = 0; crucible.particles = [];
+    crucible.last = performance.now();
+    cancelAnimationFrame(crucible.raf);
+    crucible.raf = requestAnimationFrame(crucibleTick);
+  }
+
+  function crucibleSpawn(n, good) {
+    for (var i = 0; i < n; i++) {
+      crucible.particles.push({
+        x: 360 + (Math.random() - 0.5) * 160,
+        y: 210 + (Math.random() - 0.5) * 120,
+        vx: (Math.random() - 0.5) * 60,
+        vy: -40 - Math.random() * 80,
+        life: 0.8 + Math.random() * 0.8,
+        color: good ? "#c7ff38" : "#ff6b2c"
+      });
+    }
+  }
+
+  function crucibleTick(now) {
+    var c = crucible;
+    if (!c.running) return;
+    var dt = Math.min(0.05, (now - c.last) / 1000);
+    c.last = now;
+
+    c.shockTimer -= dt;
+    if (c.shockTimer <= 0) {
+      c.shockTimer = 2 + Math.random() * 3;
+      var imp = (Math.random() < 0.5 ? -1 : 1) * (10 + Math.random() * 16);
+      c.stability += imp;
+      c.shake = 10;
+      crucibleSpawn(14, false);
+    }
+    c.stability += (Math.random() - 0.5) * 22 * dt;
+    c.stability += Math.sin(now / 700) * 6 * dt;
+    if (c.vent) c.stability -= 30 * dt;
+    if (c.stoke) c.stability += 30 * dt;
+    c.stability = Math.max(0, Math.min(100, c.stability));
+
+    var inBand = c.stability >= 40 && c.stability <= 70;
+    if (inBand) {
+      c.integrity = Math.min(100, c.integrity + 6 * dt);
+      if (Math.random() < dt * 8) crucibleSpawn(2, true);
+    } else {
+      var dist = c.stability < 40 ? 40 - c.stability : c.stability - 70;
+      c.integrity -= (8 + dist * 1.4) * dt;
+      if (Math.random() < dt * 20) crucibleSpawn(3, false);
+    }
+    c.timeLeft -= dt;
+    c.shake = Math.max(0, c.shake - 30 * dt);
+
+    for (var i = c.particles.length - 1; i >= 0; i--) {
+      var p = c.particles[i];
+      p.life -= dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      if (p.life <= 0) c.particles.splice(i, 1);
+    }
+
+    if (c.integrity <= 0 && !c.lost) {
+      c.integrity = 0; c.lost = true; c.running = false;
+      crucibleSpawn(60, false);
+    } else if (c.timeLeft <= 0 && !c.won) {
+      c.timeLeft = 0; c.won = true; c.running = false;
+      crucibleSpawn(80, true);
+      var v = (typeof currentInvention === "function") ? currentInvention() : null;
+      window.__crucibleCert = "crucible-forged" + (v ? " (" + v.name + ")" : "") + " " + new Date().toISOString().slice(0, 10);
+      if (typeof updateInfluenceRow === "function") updateInfluenceRow();
+      toast("FORGED. The invention survived the Crucible.");
+    }
+
+    crucibleDraw();
+    if (c.running || c.particles.length) c.raf = requestAnimationFrame(crucibleTick);
+    else crucibleDrawEnd();
+  }
+
+  function crucibleDraw() {
+    var c = crucible, ctx = c.canvas.getContext("2d");
+    var W = 720, H = 460;
+    ctx.save();
+    ctx.fillStyle = "#060b0c";
+    ctx.fillRect(0, 0, W, H);
+    if (c.shake > 0) ctx.translate((Math.random() - 0.5) * c.shake, (Math.random() - 0.5) * c.shake);
+
+    var gx = 60, gw = 600;
+    var sx = function (v) { return gx + (v / 100) * gw; };
+
+    ctx.fillStyle = "#101716";
+    ctx.fillRect(gx, 330, gw, 46);
+    ctx.fillStyle = "rgba(199,255,56,.22)";
+    ctx.fillRect(sx(40), 330, sx(70) - sx(40), 46);
+    ctx.strokeStyle = "#c7ff38"; ctx.lineWidth = 2;
+    ctx.strokeRect(sx(40), 330, sx(70) - sx(40), 46);
+    ctx.fillStyle = "#7c8d89"; ctx.font = "600 16px monospace";
+    ctx.fillText("0", gx, 400); ctx.fillText("100", gx + gw - 30, 400);
+    ctx.fillStyle = "#c7ff38";
+    ctx.fillText("KEEP THE NEEDLE IN THE GREEN", gx, 322);
+
+    var nx = sx(c.stability);
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(nx, 322); ctx.lineTo(nx, 384); ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.moveTo(nx - 8, 322); ctx.lineTo(nx + 8, 322); ctx.lineTo(nx, 310); ctx.fill();
+
+    var danger = c.stability < 40 ? (40 - c.stability) / 40 : c.stability > 70 ? (c.stability - 70) / 30 : 0;
+    var pulse = 1 + Math.sin(performance.now() / 180) * 0.06;
+    var coreR = 62 * pulse;
+    var grad = ctx.createRadialGradient(360, 200, 8, 360, 200, coreR + 40);
+    var hot = danger > 0.02;
+    grad.addColorStop(0, hot ? "rgba(255,70,104,.9)" : "rgba(199,255,56,.75)");
+    grad.addColorStop(1, "rgba(6,11,12,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(360, 200, coreR + 40, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = hot ? "#ff4668" : "#c7ff38"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(360, 200, coreR, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(88,228,232,.5)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(360, 200, coreR + 22, 0, Math.PI * 2); ctx.stroke();
+
+    c.particles.forEach(function (p) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, 3, 3);
+    });
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#7c8d89"; ctx.font = "600 16px monospace";
+    ctx.fillText("HULL INTEGRITY", gx, 52);
+    var bw = 300;
+    ctx.fillStyle = "#101716"; ctx.fillRect(gx, 60, bw, 20);
+    var ic = c.integrity > 50 ? "#c7ff38" : c.integrity > 25 ? "#ff6b2c" : "#ff4668";
+    ctx.fillStyle = ic; ctx.fillRect(gx, 60, bw * (c.integrity / 100), 20);
+    ctx.strokeStyle = "#2a3b37"; ctx.strokeRect(gx, 60, bw, 20);
+    ctx.fillStyle = "#e9f4e8"; ctx.font = "700 22px monospace";
+    ctx.fillText(Math.ceil(c.integrity) + "%", gx + bw + 14, 78);
+
+    ctx.fillStyle = "#7c8d89"; ctx.font = "600 16px monospace";
+    ctx.fillText("TIME", gx + 470, 52);
+    ctx.fillStyle = "#58e4e8"; ctx.font = "700 30px monospace";
+    ctx.fillText(Math.ceil(c.timeLeft) + "s", gx + 470, 80);
+
+    ctx.restore();
+  }
+
+  function crucibleDrawEnd() {
+    var c = crucible, ctx = c.canvas.getContext("2d");
+    ctx.save();
+    ctx.fillStyle = "rgba(4,8,8,.72)";
+    ctx.fillRect(0, 0, 720, 460);
+    ctx.textAlign = "center";
+    if (c.won) {
+      ctx.fillStyle = "#c7ff38"; ctx.font = "700 84px sans-serif";
+      ctx.fillText("FORGED", 360, 210);
+      ctx.fillStyle = "#e9f4e8"; ctx.font = "20px monospace";
+      ctx.fillText("The invention survived the full burn.", 360, 260);
+      ctx.fillText("Certification stamped on its record.", 360, 292);
+    } else {
+      ctx.fillStyle = "#ff4668"; ctx.font = "700 72px sans-serif";
+      ctx.fillText("MELTDOWN", 360, 210);
+      ctx.fillStyle = "#e9f4e8"; ctx.font = "20px monospace";
+      ctx.fillText("Hull integrity reached zero.", 360, 260);
+      ctx.fillText("The garage salutes your sacrifice.", 360, 292);
+    }
+    ctx.restore();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", buildCrucible);
+  } else {
+    buildCrucible();
+  }
 
 </script>
 </body>
