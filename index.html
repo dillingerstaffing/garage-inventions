@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <link rel="icon" href="data:," />
+  <title>Garage Inventions</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+    :root {
+      --ink: #e9f4e8;
+      --muted: #9aacaa;
+      --black: #080c0c;
+      --panel: #101716;
+      --panel-2: #151e1c;
+      --line: #2a3b37;
+      --acid: #c7ff38;
+      --orange: #ff6b2c;
+      --cyan: #58e4e8;
+      --danger: #ff4668;
+      --radius: 10px;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--black); }
+    body {
+      margin: 0;
+      min-width: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(88, 228, 232, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(88, 228, 232, .035) 1px, transparent 1px),
+        var(--black);
+      background-size: 32px 32px;
+      font-family: "IBM Plex Mono", monospace;
+      overflow-x: hidden;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .page {
+      width: min(1380px, 100%);
+      margin: 0 auto;
+      padding: clamp(18px, 3vw, 42px);
+    }
+
+    .signal {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+    }
+
+    .signal h1 {
+      font-family: "Chakra Petch", sans-serif;
+      font-size: clamp(36px, 6.3vw, 88px);
+      line-height: .9;
+      max-width: 950px;
+      letter-spacing: -.045em;
+      margin: 0;
+      text-transform: uppercase;
+    }
+
+    .signal h1 span { color: var(--acid); }
+
+    .signal p {
+      max-width: 640px;
+      margin: 14px 0 0;
+      font-size: clamp(13px, 1.2vw, 16px);
+      line-height: 1.65;
+      color: var(--muted);
+    }
+
+    .status {
+      min-width: 184px;
+      color: var(--cyan);
+      font-size: 11px;
+      line-height: 1.8;
+      text-align: right;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+    }
+    .status b { color: var(--acid); font-weight: 600; }
+    .pulse {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-right: 8px;
+      background: var(--acid);
+      box-shadow: 0 0 12px rgba(199, 255, 56, .8);
+      animation: blink 1.5s steps(2) infinite;
+    }
+
+    .reactor {
+      display: grid;
+      grid-template-columns: minmax(270px, .75fr) minmax(0, 2.25fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .controls,
+    .blueprint,
+    .dossier,
+    .manifesto {
+      background: rgba(16, 23, 22, .94);
+      border: 1px solid var(--line);
+    }
+
+    .controls { padding: 20px; position: sticky; top: 16px; }
+
+    .section-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--cyan);
+      font-size: 10px;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    .section-label .index { color: #647572; }
+
+    .control {
+      margin-top: 22px;
+    }
+    .control-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    .control-head output { color: var(--acid); font-size: 12px; }
+
+    input[type="range"] {
+      width: 100%;
+      height: 18px;
+      margin: 0;
+      appearance: none;
+      background: transparent;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      background: var(--line);
+      border-radius: 0;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      appearance: none;
+      width: 14px;
+      height: 18px;
+      margin-top: -7px;
+      background: var(--acid);
+      border: 0;
+      border-radius: 0;
+    }
+    input[type="range"]::-moz-range-track { height: 4px; background: var(--line); }
+    input[type="range"]::-moz-range-thumb { width: 14px; height: 18px; background: var(--acid); border: 0; border-radius: 0; }
+
+    .primary {
+      width: 100%;
+      border: 0;
+      background: var(--acid);
+      color: #0b110d;
+      padding: 15px 16px;
+      margin-top: 26px;
+      font-family: "Chakra Petch", sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+    .primary::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: var(--cyan);
+      transform: translateX(-102%);
+      transition: transform .18s ease;
+    }
+    .primary span { position: relative; z-index: 1; }
+    .primary:hover::after { transform: translateX(0); }
+    .primary:active { transform: translateY(1px); }
+
+    .warning {
+      margin: 14px 0 0;
+      color: #72827f;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .output { min-width: 0; }
+    .lab-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.42fr) minmax(290px, .8fr);
+      gap: 16px;
+    }
+
+    .blueprint {
+      min-height: 515px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(rgba(88,228,232,.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(88,228,232,.08) 1px, transparent 1px),
+        #0a1416;
+      background-size: 24px 24px;
+    }
+    .blueprint::before,
+    .blueprint::after {
+      content: "";
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      border-color: var(--cyan);
+      opacity: .8;
+      pointer-events: none;
+    }
+    .blueprint::before { left: 11px; top: 11px; border-left: 2px solid; border-top: 2px solid; }
+    .blueprint::after { right: 11px; bottom: 11px; border-right: 2px solid; border-bottom: 2px solid; }
+
+    .bp-head {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 10px;
+      color: var(--cyan);
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .bp-head span:last-child { color: var(--orange); }
+
+    #schematic {
+      width: 100%;
+      height: 430px;
+      display: block;
+      margin-top: 8px;
+      filter: drop-shadow(0 0 10px rgba(88, 228, 232, .15));
+    }
+
+    .dossier { padding: 22px; }
+    .invention-id {
+      color: var(--orange);
+      font-size: 10px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .dossier h2 {
+      font-family: "Chakra Petch", sans-serif;
+      font-size: clamp(29px, 3vw, 46px);
+      line-height: .95;
+      letter-spacing: -.035em;
+      overflow-wrap: anywhere;
+      text-transform: uppercase;
+      margin: 11px 0 16px;
+    }
+    .purpose {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.65;
+      margin: 0 0 22px;
+    }
+
+    .specs { margin: 0; }
+    .spec {
+      border-top: 1px solid var(--line);
+      padding: 12px 0;
+      display: grid;
+      grid-template-columns: 94px 1fr;
+      gap: 12px;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .spec dt { color: #7c8d89; text-transform: uppercase; }
+    .spec dd { margin: 0; color: #d5e2df; }
+    .spec dd.danger { color: var(--danger); }
+
+    .meter {
+      display: grid;
+      grid-template-columns: repeat(10, 1fr);
+      gap: 3px;
+      margin-top: 7px;
+    }
+    .meter i { display: block; height: 8px; background: #27312f; }
+    .meter i.on { background: var(--acid); }
+
+    .actions { display: flex; gap: 8px; margin-top: 18px; }
+    .secondary {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid #3c514d;
+      background: transparent;
+      padding: 10px 9px;
+      font-size: 10px;
+      color: var(--cyan);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      cursor: pointer;
+    }
+    .secondary:hover { border-color: var(--cyan); background: rgba(88,228,232,.07); }
+
+    .manifesto {
+      margin-top: 16px;
+      padding: 22px;
+      display: grid;
+      grid-template-columns: minmax(180px, .55fr) minmax(0, 1.45fr);
+      gap: 30px;
+      align-items: start;
+    }
+    .manifesto h3 {
+      margin: 0;
+      color: var(--orange);
+      font-family: "Chakra Petch", sans-serif;
+      font-size: 21px;
+      text-transform: uppercase;
+    }
+    .transcript {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.8;
+      color: #b9c9c5;
+    }
+    .transcript strong { color: var(--acid); font-weight: 500; }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: max(18px, env(safe-area-inset-bottom));
+      transform: translate(-50%, 20px);
+      padding: 10px 14px;
+      background: var(--acid);
+      color: #07100b;
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: .2s ease;
+      z-index: 10;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    .glitching #schematic { animation: glitch .42s steps(2) 1; }
+    .glitching .dossier h2 { animation: typeJolt .42s steps(2) 1; }
+
+    @keyframes blink { 50% { opacity: .25; } }
+    @keyframes glitch {
+      0% { transform: translate(0); filter: hue-rotate(0); }
+      20% { transform: translate(-5px, 2px); filter: hue-rotate(100deg); }
+      40% { transform: translate(4px, -2px); }
+      70% { transform: translate(-2px, 1px); filter: hue-rotate(-50deg); }
+      100% { transform: translate(0); }
+    }
+    @keyframes typeJolt {
+      25% { transform: translateX(4px); color: var(--cyan); }
+      50% { transform: translateX(-3px); color: var(--orange); }
+      100% { transform: translateX(0); }
+    }
+
+    @media (max-width: 980px) {
+      .reactor { grid-template-columns: 1fr; }
+      .controls { position: static; }
+      .controls-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .control { margin-top: 18px; }
+      .primary { max-width: 360px; }
+    }
+
+    @media (max-width: 760px) {
+      .page { padding: 18px 14px 28px; }
+      .signal { grid-template-columns: 1fr; }
+      .status { text-align: left; min-width: 0; }
+      .lab-grid { grid-template-columns: 1fr; }
+      .blueprint { min-height: 390px; }
+      #schematic { height: 320px; }
+      .controls-grid { grid-template-columns: 1fr; gap: 0; }
+      .manifesto { grid-template-columns: 1fr; gap: 12px; }
+      .spec { grid-template-columns: 82px 1fr; }
+    }
+
+    @media (max-width: 420px) {
+      .signal h1 { font-size: 42px; }
+      .actions { flex-direction: column; }
+      .primary { max-width: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="signal" aria-labelledby="main-title">
+      <div>
+        <h1 id="main-title">Reality is optional.<br><span>Utility is not.</span></h1>
+        <p>A garage-grade idea collider for devices that should not exist, but absolutely need to. Set the tolerances, engage the reactor, and leave causality outside.</p>
+      </div>
+      <div class="status" aria-label="Reactor status">
+        <div><span class="pulse"></span><b>Reactor lucid</b></div>
+        <div>Dimension: 3.7</div>
+        <div>Warranty: emotionally void</div>
+      </div>
+    </section>
+
+    <section class="reactor" aria-label="Invention reactor">
+      <aside class="controls">
+        <div class="section-label"><span>Input tolerances</span><span class="index">01</span></div>
+        <div class="controls-grid">
+          <div class="control">
+            <div class="control-head"><label for="useful">Usefulness</label><output id="usefulOut">74%</output></div>
+            <input id="useful" type="range" min="0" max="100" value="74" />
+          </div>
+          <div class="control">
+            <div class="control-head"><label for="impossible">Impossibility</label><output id="impossibleOut">89%</output></div>
+            <input id="impossible" type="range" min="0" max="100" value="89" />
+          </div>
+          <div class="control">
+            <div class="control-head"><label for="chaos">Chaos exposure</label><output id="chaosOut">63%</output></div>
+            <input id="chaos" type="range" min="0" max="100" value="63" />
+          </div>
+        </div>
+        <button class="primary" id="collide"><span>Collide another idea</span></button>
+        <p class="warning">Protective goggles are symbolic. Results are generated in this tab and vanish when the aperture closes.</p>
+      </aside>
+
+      <div class="output">
+        <div class="lab-grid" id="labGrid">
+          <section class="blueprint" aria-label="Invention schematic">
+            <div class="bp-head"><span>Unlicensed schematic</span><span id="bpRevision">REV 7.3-Q</span></div>
+            <svg id="schematic" viewBox="0 0 720 460" role="img" aria-label="Abstract technical schematic of the current invention"></svg>
+          </section>
+
+          <article class="dossier" aria-live="polite">
+            <div class="invention-id" id="inventionId">Specimen GI-7C1F</div>
+            <h2 id="name">Möbius Kettle</h2>
+            <p class="purpose" id="purpose">Circulates heat through a short closed-time loop, bringing water to a boil seconds before the switch is pressed.</p>
+            <dl class="specs">
+              <div class="spec"><dt>Built from</dt><dd id="built">A thrift-store kettle, bicycle dynamo, copper induction coil, ceramic spacers, and a temporal phase ring.</dd></div>
+              <div class="spec"><dt>Powered by</dt><dd id="power">A mains heating element stabilized by the bicycle dynamo's phase-control circuit.</dd></div>
+              <div class="spec"><dt>Side effect</dt><dd class="danger" id="failure">A loop longer than four seconds can reheat the same water twice and trigger the thermal cutoff.</dd></div>
+              <div class="spec"><dt>Utility</dt><dd><span id="utilityText">Surprisingly defensible</span><span class="meter" id="meter" aria-label="Utility rating"></span></dd></div>
+            </dl>
+            <div class="actions">
+              <button class="secondary" id="copyBtn">Copy blueprint</button>
+              <button class="secondary" id="downloadBtn">Download build packet</button>
+            </div>
+          </article>
+        </div>
+
+        <section class="manifesto">
+          <h3>Prototype field notes</h3>
+          <p class="transcript" id="transcript">The first temporal coil overheated after 41 seconds, so I moved the return loop away from the kettle wall and added a ceramic spacer. <strong>Revision two reaches a boil before the switch is pressed</strong>, but only by 3.8 seconds. That is enough for tea, and not enough to upset causality.</p>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const inventions = [
+      {
+        names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
+        purposes: [
+          "Circulates heat through a short closed-time loop, bringing water to a boil seconds before the switch is pressed.",
+          "Reuses the same burst of heat across several adjacent moments to reduce the wait for boiling water.",
+          "Samples a few near-future temperatures and stops heating at the earliest safe steeping point."
+        ],
+        built: "A thrift-store kettle, bicycle dynamo, copper induction coil, ceramic spacers, and a temporal phase ring.",
+        power: "A mains heating element stabilized by the bicycle dynamo's phase-control circuit.",
+        failure: "A loop longer than four seconds can reheat the same water twice and trigger the thermal cutoff.",
+        transcript: "The first temporal coil overheated after 41 seconds, so I moved the return loop away from the kettle wall and added a ceramic spacer. <strong>Revision two reaches a boil before the switch is pressed</strong>, but only by 3.8 seconds. That is enough for tea, and not enough to upset causality."
+      },
+      {
+        names: ["Sock Event Horizon", "Laundry Singularity", "Pairadox Engine"],
+        purposes: [
+          "Scans the narrow spaces around a dryer and pulls trapped socks toward a low-power magnetic collection ring.",
+          "Matches socks by weave, dye spectrum, size, and wear pattern before they leave the laundry basket.",
+          "Uses lint fibers as trace evidence to locate the last machine that handled a missing garment."
+        ],
+        built: "A salad spinner, polarized camera, two surplus electromagnets, and a doorbell transformer.",
+        power: "Static charge recovered from the dryer's exhaust stream and buffered in a capacitor bank.",
+        failure: "At maximum field strength, it can retrieve a visually identical sock from a nearby parallel timeline.",
+        transcript: "The first scan found two socks behind the drum and one inside the fitted-sheet fold. The spectral matcher rejected a convincing impostor because its heel had <strong>11 percent more fiber wear</strong>. Next revision gets a quieter magnet driver."
+      },
+      {
+        names: ["Regret Compostor", "Second-Thought Mulcher", "Hindsight Garden"],
+        purposes: [
+          "Records a short regret, extracts one actionable lesson, and prints it on a biodegradable seed plug.",
+          "Turns repetitive self-critical phrases into timed watering and light adjustments for a planter.",
+          "Pairs a written second thought with a herb seed, giving the reflection a useful physical outcome."
+        ],
+        built: "A hand-crank paper shredder, terracotta pot, contact microphone, moisture sensor, and thermal printer.",
+        power: "A small solar cell charging the sensor, printer, and automated drip valve.",
+        failure: "Overfeeding the text analyzer can produce more seed plugs than the planter can support.",
+        transcript: "The prototype accepts one sentence, identifies the practical lesson, and shreds the original note into mulch. After a week, the moisture controller used the lesson's urgency score to adjust watering by <strong>eight milliliters per day</strong>. The basil remains ordinary, which is ideal."
+      },
+      {
+        names: ["Ambient Applause Array", "Validation Radar", "Clap Capacitor"],
+        purposes: [
+          "Recognizes the sound pattern of a completed task and plays applause scaled to the effort involved.",
+          "Uses motion, tool noise, and elapsed time to detect quiet moments of competent work.",
+          "Stores voice-recorded compliments and releases the most relevant one after a difficult task."
+        ],
+        built: "Three piezo discs, a directional microphone, an old radio antenna, and a compact speaker.",
+        power: "A rechargeable battery topped up by vibration harvesters mounted under the workbench.",
+        failure: "Opening a stubborn jar can resemble a completed repair and trigger a full standing ovation.",
+        transcript: "I trained the detector on drill stops, ratchet clicks, and the sudden silence after a motor finally starts. It correctly recognized four completed repairs, but also applauded a jar opening. <strong>The next model needs a stricter definition of success.</strong>"
+      },
+      {
+        names: ["Pocket Weather Negotiator", "Rain Arbitration Unit", "Microclimate Diplomat"],
+        purposes: [
+          "Maintains a two-meter pocket of comfortable temperature and humidity around its carrier.",
+          "Uses directed airflow and charged droplets to divert light rain for the length of a short walk.",
+          "Moves excess humidity behind the wearer while preserving a dry corridor ahead."
+        ],
+        built: "A reinforced umbrella, barometer, ducted fan, ionizer grid, and six meters of insulated ribbon cable.",
+        power: "A lithium battery assisted by a microturbine that harvests energy from incoming wind.",
+        failure: "Crosswinds above 35 kilometers per hour can collapse the dry corridor into sideways spray.",
+        transcript: "Bench tests held a dry cylinder against simulated drizzle for seven minutes. Gusts exposed a weak point where the ionizer meets the canopy, so I split the airflow into six independently steered sectors. <strong>Revision three stays dry while walking.</strong>"
+      },
+      {
+        names: ["Motivation Jump-Starter", "Momentum Defibrillator", "Task Ignition Coil"],
+        purposes: [
+          "Starts a stalled project with a five-minute sequence of haptic prompts and distraction lockouts.",
+          "Uses completion of one tiny task to unlock the tools needed for the next larger step.",
+          "Breaks an intimidating project into a timed first action that can begin immediately."
+        ],
+        built: "A kitchen timer, vibration motor, mechanical pencil, rotary encoder, and a shielded phone sleeve.",
+        power: "A rechargeable cell that gains a small boost whenever the hand crank marks a task complete.",
+        failure: "An overlong task chain can keep unlocking new steps after the planned work session ends.",
+        transcript: "The first sequence was too ambitious, so I reduced it to one tool, one surface, and five minutes. The crank now unlocks the next instruction only after the current step is physically marked complete. <strong>Starting became easier without pretending the work was easy.</strong>"
+      },
+      {
+        names: ["Silence Lathe", "Noise Carpenter", "Quiet Fabricator"],
+        purposes: [
+          "Measures a room's noise field and shapes a head-sized zone of active cancellation around the user.",
+          "Removes recurring traffic, appliance, and leaf-blower frequencies for a forty-minute focus session.",
+          "Combines directional speakers with folding acoustic panels to create a portable quiet booth."
+        ],
+        built: "A box fan housing, acoustic foam, four microphones, a signal processor, and directional speakers.",
+        power: "A rechargeable tool battery driving real-time phase inversion across four audio channels.",
+        failure: "Moving outside the calibrated zone can briefly double a canceled frequency instead of removing it.",
+        transcript: "The four-microphone array mapped the refrigerator hum and traffic rumble in 23 seconds. Phase inversion reduced the low-frequency level by <strong>18 decibels at the work stool</strong>. The cancellation zone still needs to track head movement."
+      },
+      {
+        names: ["Dream Parts Printer", "Hypnagogic CNC", "REM Foundry"],
+        purposes: [
+          "Reconstructs a rough 3D model from spatial imagery recorded during the first minutes after waking.",
+          "Converts remembered dream geometry into foam prototypes that can be measured and corrected while awake.",
+          "Fabricates the oddly specific tool shape that seemed obvious at 4:00 a.m."
+        ],
+        built: "A compact EEG band, depth camera, stepper motors, foam stock, and a three-axis milling frame.",
+        power: "A tool battery for the mill and a low-voltage neural decoder for the overnight capture band.",
+        failure: "The recovered shape can preserve dream proportions, producing parts that look right but do not fit.",
+        transcript: "The decoder recovered a thirteen-tooth gear from the waking buffer and milled it in foam. Its bore was oval and two teeth were undersized, but the overall geometry matched the morning sketch. <strong>Dream capture is useful as a starting model, not a final dimension.</strong>"
+      }
+    ];
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const $ = (id) => document.getElementById(id);
+    const controls = ["useful", "impossible", "chaos"];
+    let current = inventions[0];
+    let revision = 1;
+
+    controls.forEach(id => {
+      $(id).addEventListener("input", () => $(id + "Out").textContent = $(id).value + "%");
+    });
+
+    function rand(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+    function hashSeed(text) {
+      let h = 2166136261;
+      for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+      return Math.abs(h >>> 0);
+    }
+    function seeded(seed) {
+      let value = seed || 1;
+      return () => { value = (value * 16807) % 2147483647; return (value - 1) / 2147483646; };
+    }
+
+    function addSvg(tag, attrs, parent) {
+      const el = document.createElementNS(svgNS, tag);
+      Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+      (parent || $("schematic")).appendChild(el);
+      return el;
+    }
+
+    function drawSchematic(name, chaos) {
+      const svg = $("schematic");
+      svg.replaceChildren();
+      const r = seeded(hashSeed(name + chaos));
+      const defs = addSvg("defs", {});
+      const marker = addSvg("marker", {id:"arrow", markerWidth:"8", markerHeight:"8", refX:"5", refY:"3", orient:"auto", markerUnits:"strokeWidth"}, defs);
+      addSvg("path", {d:"M0,0 L0,6 L6,3 z", fill:"#ff6b2c"}, marker);
+      const glow = addSvg("filter", {id:"glow"}, defs);
+      addSvg("feGaussianBlur", {stdDeviation:"3", result:"blur"}, glow);
+      const merge = addSvg("feMerge", {}, glow);
+      addSvg("feMergeNode", {in:"blur"}, merge);
+      addSvg("feMergeNode", {in:"SourceGraphic"}, merge);
+
+      const cx = 360, cy = 235;
+      const rings = 3 + Math.floor(r() * 3);
+      for (let i=0; i<rings; i++) {
+        const radius = 55 + i * 38;
+        addSvg("circle", {cx, cy, r:radius, fill:"none", stroke:i%2 ? "#58e4e8" : "#c7ff38", "stroke-width":i===0?3:1.5, "stroke-dasharray": i%2 ? "9 9" : "none", opacity: .86 - i*.1, transform:`rotate(${Math.floor(r()*90)} ${cx} ${cy})`});
+      }
+      addSvg("circle", {cx, cy, r:34, fill:"rgba(199,255,56,.1)", stroke:"#c7ff38", "stroke-width":3, filter:"url(#glow)"});
+      addSvg("path", {d:`M${cx-17} ${cy} L${cx-6} ${cy-18} L${cx+5} ${cy+2} L${cx+18} ${cy-12}`, fill:"none", stroke:"#c7ff38", "stroke-width":4});
+
+      const nodes = [];
+      const count = 5 + Math.floor((Number(chaos) / 100) * 4);
+      for (let i=0; i<count; i++) {
+        const angle = (Math.PI * 2 * i / count) + r() * .45;
+        const dist = 150 + r() * 65;
+        const x = cx + Math.cos(angle) * dist;
+        const y = cy + Math.sin(angle) * dist * .72;
+        nodes.push({x, y});
+        addSvg("line", {x1:cx + Math.cos(angle)*75, y1:cy + Math.sin(angle)*75, x2:x, y2:y, stroke:"#3d7776", "stroke-width":1.5, "stroke-dasharray":"4 6", "marker-end":"url(#arrow)"});
+        if (i % 3 === 0) {
+          addSvg("rect", {x:x-22, y:y-17, width:44, height:34, fill:"#0a1416", stroke:"#ff6b2c", "stroke-width":2});
+          addSvg("circle", {cx:x, cy:y, r:6, fill:"#ff6b2c"});
+        } else if (i % 3 === 1) {
+          addSvg("polygon", {points:`${x},${y-24} ${x+24},${y+18} ${x-24},${y+18}`, fill:"#0a1416", stroke:"#58e4e8", "stroke-width":2});
+          addSvg("circle", {cx:x, cy:y+3, r:5, fill:"#58e4e8"});
+        } else {
+          addSvg("circle", {cx:x, cy:y, r:19, fill:"#0a1416", stroke:"#c7ff38", "stroke-width":2});
+          addSvg("line", {x1:x-9,y1:y,x2:x+9,y2:y,stroke:"#c7ff38","stroke-width":2});
+          addSvg("line", {x1:x,y1:y-9,x2:x,y2:y+9,stroke:"#c7ff38","stroke-width":2});
+        }
+        const label = addSvg("text", {x:x + (x<cx?-8:8), y:y-31, fill:"#8cc2c2", "font-size":10, "font-family":"IBM Plex Mono, monospace", "text-anchor":x<cx?"end":"start"});
+        label.textContent = `NODE ${String(i+1).padStart(2,"0")} / ${Math.floor(r()*900+100)}mV`;
+      }
+      for (let i=0; i<nodes.length-1; i+=2) {
+        addSvg("path", {d:`M${nodes[i].x} ${nodes[i].y} Q${cx} ${40 + r()*340} ${nodes[i+1].x} ${nodes[i+1].y}`, fill:"none", stroke:"#284a49", "stroke-width":1});
+      }
+      addSvg("line", {x1:44,y1:418,x2:230,y2:418,stroke:"#58e4e8","stroke-width":1});
+      const caption = addSvg("text", {x:44,y:407,fill:"#58e4e8","font-size":11,"font-family":"IBM Plex Mono, monospace"});
+      caption.textContent = name.toUpperCase();
+      const caution = addSvg("text", {x:676,y:418,fill:"#ff6b2c","font-size":10,"font-family":"IBM Plex Mono, monospace","text-anchor":"end"});
+      caution.textContent = "DO NOT INVERT WHILE INVERTED";
+    }
+
+    function renderMeter(value) {
+      const meter = $("meter");
+      meter.replaceChildren();
+      for (let i=0; i<10; i++) {
+        const bar = document.createElement("i");
+        if (i < Math.round(value / 10)) bar.className = "on";
+        meter.appendChild(bar);
+      }
+      meter.setAttribute("aria-label", `Utility rating ${value} out of 100`);
+    }
+
+    function utilityPhrase(value) {
+      if (value > 86) return "Alarmingly practical";
+      if (value > 66) return "Surprisingly defensible";
+      if (value > 42) return "Useful under narrow conditions";
+      if (value > 20) return "Mostly a conversation piece";
+      return "Hostile to conventional purpose";
+    }
+
+    function generate() {
+      const previous = current;
+      do { current = rand(inventions); } while (inventions.length > 1 && current === previous);
+      revision++;
+      const name = rand(current.names);
+      const utility = Number($("useful").value);
+      const chaos = Number($("chaos").value);
+      const impossible = Number($("impossible").value);
+      const code = hashSeed(name + revision).toString(16).slice(0,4).toUpperCase().padStart(4,"0");
+      $("name").textContent = name;
+      $("purpose").textContent = rand(current.purposes);
+      $("built").textContent = current.built;
+      $("power").textContent = current.power;
+      $("failure").textContent = current.failure;
+      $("transcript").innerHTML = current.transcript;
+      $("inventionId").textContent = `Specimen GI-${code}`;
+      $("bpRevision").textContent = `REV ${revision}.${Math.floor(impossible/10)}-${String.fromCharCode(65 + Math.floor(chaos/4)%26)}`;
+      $("utilityText").textContent = utilityPhrase(utility);
+      renderMeter(utility);
+      drawSchematic(name, chaos);
+      $("labGrid").classList.remove("glitching");
+      void $("labGrid").offsetWidth;
+      $("labGrid").classList.add("glitching");
+    }
+
+    function blueprintText() {
+      return `${$("name").textContent.toUpperCase()}\n${$("inventionId").textContent}\n\nPURPOSE\n${$("purpose").textContent}\n\nBUILT FROM\n${$("built").textContent}\n\nPOWER SOURCE\n${$("power").textContent}\n\nKNOWN SIDE EFFECT\n${$("failure").textContent}\n\nUTILITY\n${$("utilityText").textContent} (${$("useful").value}/100)\n\nGARAGE NOTE\nReality is optional. Utility is not.`;
+    }
+
+    let toastTimer;
+    function showToast(message) {
+      const toast = $("toast");
+      toast.textContent = message;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 1800);
+    }
+
+    $("collide").addEventListener("click", generate);
+    $("copyBtn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(blueprintText()); showToast("Blueprint copied to clipboard"); }
+      catch { showToast("Clipboard access was unavailable"); }
+    });
+    $("downloadBtn").addEventListener("click", () => {
+      const blob = new Blob([blueprintText()], {type:"text/plain;charset=utf-8"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = $("name").textContent.toLowerCase().replace(/[^a-z0-9]+/g,"-") + "-build-packet.txt";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      showToast("Build packet downloaded");
+    });
+
+    renderMeter(74);
+    drawSchematic("Möbius Kettle", 63);
+  </script>
+</body>
+</html>
