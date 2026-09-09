@@ -15,6 +15,7 @@ Garage Inventions is a collection of real, working interactive benches: small en
 - Silicon Anvil: forge and test ideas on the anvil; links out to the RISC-V Playground.
 - The Dyno Room: engine tuning bench. Ignition advance, air-fuel ratio, and cam-timing sliders; live power and torque chart; three trials; knock and exhaust-gas-temperature damage fail states; downloadable dyno-sheet certificate.
 - Aerodynamics Bench: airflow experiments.
+- The Wind Tunnel: NACA-style airfoil test bench. Camber, thickness, chord, angle of attack, airspeed, and altitude sliders; live CL/CD/lift/drag/L/D/Reynolds readouts with animated streamlines and stall separation; three flight-test trials (heavy lift, efficiency cruise, blind stall-angle reading) and a downloadable flight-test certificate.
 - PID Bench: control-loop tuning.
 - Suspension Bench: suspension dynamics.
 - Signal Lock Bench: signal acquisition and locking.

@@ -8313,3 +8313,813 @@ function gyScoreLift(st) {
   }
 
 })();
+
+/* ============================================================
+   GARAGE INVENTION: THE WIND TUNNEL
+   Aerodynamics bench. Shape a NACA-style wing section, set the
+   airflow, watch live lift and drag with animated streamlines,
+   and fly three flight-test trials. Thin airfoil theory inside,
+   real numbers out. Self-contained: no outside dependencies.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------------- pure physics (node-testable) ---------------- */
+  var WT_MU = 1.81e-5;
+  var WT_K = 1 / (Math.PI * 6 * 0.8); /* induced drag factor, AR=6, e=0.8 */
+  var WT_RHOS = [
+    { n: "Sea level", v: 1.225 },
+    { n: "3000 m", v: 0.909 },
+    { n: "9000 m", v: 0.467 }
+  ];
+
+  function wtAlpha0(m) { return -100 * m; }         /* zero-lift angle, degrees */
+  function wtStallAngle(m) { return 14 + 60 * m; }  /* stall angle, degrees */
+
+  function wtCL(alpha, m) {
+    var a0 = wtAlpha0(m), stall = wtStallAngle(m);
+    var cl = 2 * Math.PI * (alpha - a0) * Math.PI / 180;
+    if (alpha > stall) {
+      var clS = 2 * Math.PI * (stall - a0) * Math.PI / 180;
+      cl = clS - 0.045 * (alpha - stall);
+      if (cl < 0.25 * clS) cl = 0.25 * clS;
+    }
+    return cl;
+  }
+
+  function wtCD(alpha, m, t, cl) {
+    var cd = 0.004 + 0.03 * t + WT_K * cl * cl;
+    if (alpha > wtStallAngle(m)) cd += 0.02 * (alpha - wtStallAngle(m));
+    return cd;
+  }
+
+  function wtForces(alpha, m, t, chord, V, rho) {
+    var q = 0.5 * rho * V * V;
+    var cl = wtCL(alpha, m);
+    var cd = wtCD(alpha, m, t, cl);
+    var L = q * chord * cl, D = q * chord * cd;
+    return {
+      cl: cl, cd: cd, L: L, D: D, ld: D > 0 ? L / D : 0,
+      Re: rho * V * chord / WT_MU,
+      stalled: alpha > wtStallAngle(m),
+      a0: wtAlpha0(m), stallA: wtStallAngle(m)
+    };
+  }
+
+  /* NACA 4-digit section, max camber position p = 0.4 */
+  function wtAirfoil(m, t) {
+    var p = 0.4, n = 60, up = [], lo = [], i, x, yt, yc, dyc, th;
+    for (i = 0; i <= n; i++) {
+      x = i / n;
+      yt = 5 * t * (0.2969 * Math.sqrt(x) - 0.1260 * x - 0.3516 * x * x +
+                    0.2843 * x * x * x - 0.1036 * x * x * x * x);
+      if (x < p) {
+        yc = m / (p * p) * (2 * p * x - x * x);
+        dyc = 2 * m / (p * p) * (p - x);
+      } else {
+        yc = m / ((1 - p) * (1 - p)) * ((1 - 2 * p) + 2 * p * x - x * x);
+        dyc = 2 * m / ((1 - p) * (1 - p)) * (p - x);
+      }
+      th = Math.atan(dyc);
+      up.push([x - yt * Math.sin(th), yc + yt * Math.cos(th)]);
+      lo.push([x + yt * Math.sin(th), yc - yt * Math.cos(th)]);
+    }
+    return { up: up, lo: lo };
+  }
+
+  function wtSurfaceAt(surf, u) {
+    if (u <= 0) return surf[0][1];
+    if (u >= 1) return surf[surf.length - 1][1];
+    var f = u * (surf.length - 1), i = Math.floor(f), r = f - i;
+    return surf[i][1] * (1 - r) + surf[i + 1][1] * r;
+  }
+
+  /* ---------------- local helpers ---------------- */
+  var wt$ = function (id) { return document.getElementById(id); };
+  function wtToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = wt$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function wtEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function wtEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function wtDownload(name, text) {
+    var blob = new Blob([text], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 400);
+  }
+  function wtFmt(n) {
+    return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  /* ---------------- state ---------------- */
+  var S = {
+    camber: 2, thick: 12, chord: 1.5, alpha: 6, V: 55, rhoIdx: 0,
+    trial: null, passed: { t1: false, t2: false, t3: false },
+    sweepT: null, bestLD: 0, lastF: null
+  };
+
+  var WT_TRIALS = [
+    {
+      id: "t1", name: "LIFT OFF",
+      brief: "The section must lift a 9,500 N test weight while the tunnel runs at 55 m/s in sea level air. Drag must stay under 1,400 N or the drive motor overheats. Airspeed and altitude are locked for this trial. Camber, thickness, chord, and angle of attack are yours to set.",
+      locks: { V: 55, rho: 0 },
+      target: "Lift >= 9,500 N and Drag <= 1,400 N, no stall",
+      check: function (f) {
+        return [
+          { ok: f.L >= 9500, label: "Lift " + wtFmt(f.L) + " N (need >= 9,500)" },
+          { ok: f.D <= 1400, label: "Drag " + wtFmt(f.D) + " N (limit 1,400)" },
+          { ok: !f.stalled, label: f.stalled ? "STALLED: flow separated" : "Attached flow, no stall" }
+        ];
+      }
+    },
+    {
+      id: "t2", name: "ECON CRUISE",
+      brief: "Fly at 95 m/s and squeeze out a lift-to-drag ratio of 22 or better while still lifting at least 2,500 N. Airspeed is locked at 95 m/s. Altitude is free, but remember: thin air changes lift, never efficiency.",
+      locks: { V: 95, rho: null },
+      target: "L/D >= 22 and Lift >= 2,500 N, no stall",
+      check: function (f) {
+        return [
+          { ok: f.ld >= 22, label: "L/D " + f.ld.toFixed(2) + " (need >= 22)" },
+          { ok: f.L >= 2500, label: "Lift " + wtFmt(f.L) + " N (need >= 2,500)" },
+          { ok: !f.stalled, label: f.stalled ? "STALLED: flow separated" : "Attached flow, no stall" }
+        ];
+      }
+    },
+    {
+      id: "t3", name: "STALL FINDER",
+      brief: "Tunnel locked at 60 m/s, sea level air. Sweep the angle of attack and find the exact angle where this section stalls. Watch the lift readout peak and fall, then report the angle within 1.0 degree. Warning: stall angle moves with camber, so set it deliberately before you sweep.",
+      locks: { V: 60, rho: 0 },
+      target: "Report the stall angle within 1.0 degree",
+      check: null
+    }
+  ];
+
+  /* ---------------- live refresh ---------------- */
+  function wtCurrent() {
+    return wtForces(S.alpha, S.camber / 100, S.thick / 100, S.chord, S.V, WT_RHOS[S.rhoIdx].v);
+  }
+
+  function wtRefresh() {
+    var f = wtCurrent();
+    S.lastF = f;
+    if (!f.stalled && f.ld > S.bestLD) S.bestLD = f.ld;
+    var set = function (id, v) { var e = wt$(id); if (e) e.textContent = v; };
+    set("wtCL", f.cl.toFixed(3));
+    set("wtCD", f.cd.toFixed(4));
+    set("wtLift", wtFmt(f.L) + " N");
+    set("wtDrag", wtFmt(f.D) + " N");
+    set("wtLD", f.ld.toFixed(2));
+    set("wtRe", (f.Re / 1e6).toFixed(2) + " M");
+    set("wtA0", f.a0.toFixed(1) + " deg");
+    set("wtStallA", f.stallA.toFixed(1) + " deg");
+    set("wtBest", S.bestLD.toFixed(2));
+    var banner = wt$("wtStallBanner");
+    if (banner) banner.style.display = f.stalled ? "block" : "none";
+    var hint = wt$("wtHint");
+    if (hint) {
+      if (S.trial === "t1") {
+        hint.textContent = "Trial readout: Lift " + wtFmt(f.L) + " N (need 9,500), Drag " +
+          wtFmt(f.D) + " N (limit 1,400)." + (f.stalled ? " STALLED." : "");
+      } else if (S.trial === "t2") {
+        hint.textContent = "Trial readout: L/D " + f.ld.toFixed(2) + " (need 22), Lift " +
+          wtFmt(f.L) + " N (need 2,500)." + (f.stalled ? " STALLED." : "");
+      } else if (S.trial === "t3") {
+        hint.textContent = "Sweep the angle of attack. Lift peaks at the stall angle, then falls. CL now " + f.cl.toFixed(3) + ".";
+      } else {
+        hint.textContent = "Free bench. Tune the section, watch the streamlines, then fly a trial when ready.";
+      }
+    }
+  }
+
+  /* ---------------- canvas wind tunnel ---------------- */
+  var cv = null, cx2d = null, parts = [], foilCache = null, foilKey = "";
+  var WT_NP = 130;
+
+  function wtRot(x, y, ang) {
+    var c = Math.cos(ang), s = Math.sin(ang);
+    return [x * c - y * s, x * s + y * c];
+  }
+
+  function wtFoil() {
+    var key = S.camber + ":" + S.thick;
+    if (key !== foilKey) {
+      foilCache = wtAirfoil(S.camber / 100, S.thick / 100);
+      foilKey = key;
+    }
+    return foilCache;
+  }
+
+  function wtSizeCanvas() {
+    if (!cv) return;
+    var w = cv.clientWidth || 600, h = 300;
+    var dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    cv.style.height = h + "px";
+  }
+
+  function wtSpawn(p, randomU) {
+    p.u = randomU ? -0.6 + Math.random() * 2.2 : -0.6 - Math.random() * 0.15;
+    p.v = (Math.random() - 0.5) * 1.0;
+    p.px = 0; p.py = 0; p.init = false;
+  }
+
+  function wtFrame() {
+    if (!cv || !cx2d) return;
+    var dpr = window.devicePixelRatio || 1;
+    var W = cv.width, H = cv.height;
+    var ctx = cx2d;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var w = W / dpr, h = H / dpr;
+    ctx.clearRect(0, 0, w, h);
+
+    var foil = wtFoil();
+    var f = S.lastF || wtCurrent();
+    var aRad = S.alpha * Math.PI / 180;
+    var scale = Math.min(w * 0.52, h * 2.4);
+    var cx = w * 0.46, cy = h * 0.52;
+
+    function toCanvas(u, v) {
+      var p = wtRot((u - 0.25) * scale, v * scale, -aRad);
+      return [cx + p[0], cy + p[1]];
+    }
+
+    /* stall wake shading */
+    if (f.stalled) {
+      var sep = toCanvas(0.45, 0.02), te = toCanvas(1.0, 0.0), far = toCanvas(1.55, 0.22);
+      ctx.fillStyle = "rgba(255,107,44,0.10)";
+      ctx.beginPath();
+      ctx.moveTo(sep[0], sep[1] - 14);
+      ctx.lineTo(te[0], te[1] - 20);
+      ctx.lineTo(far[0], far[1] + 30);
+      ctx.lineTo(far[0], far[1] - 34);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    /* airfoil */
+    ctx.beginPath();
+    var i, p;
+    for (i = 0; i < foil.up.length; i++) {
+      p = toCanvas(foil.up[i][0], foil.up[i][1]);
+      if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]);
+    }
+    for (i = foil.lo.length - 1; i >= 0; i--) {
+      p = toCanvas(foil.lo[i][0], foil.lo[i][1]);
+      ctx.lineTo(p[0], p[1]);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "#0d1a1c";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(94,234,255,0.9)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    /* leading edge marker */
+    p = toCanvas(0, foil.up[0][1]);
+    ctx.fillStyle = "#b8ff3c";
+    ctx.beginPath();
+    ctx.arc(p[0], p[1], 3.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* particles */
+    var pxPerSec = 90 + S.V * 2.2;
+    var dt = 1 / 60;
+    var cl = f.cl, stalled = f.stalled;
+    ctx.lineWidth = 1.4;
+    for (i = 0; i < parts.length; i++) {
+      var pt = parts[i];
+      var u = pt.u, v = pt.v;
+      var yTop = wtSurfaceAt(foil.up, u), yLo = wtSurfaceAt(foil.lo, u);
+      var sp = 1;
+      if (u > 0 && u < 1) {
+        if (v >= (yTop + yLo) / 2) {
+          var dTop = v - yTop;
+          sp = 1 + 0.16 * cl * Math.exp(-Math.pow(dTop / 0.16, 2));
+        } else {
+          var dLo = yLo - v;
+          sp = 1 - 0.05 * cl * Math.exp(-Math.pow(dLo / 0.12, 2));
+        }
+      }
+      if (stalled && u > 0.45 && u < 1.7) {
+        sp *= 0.55;
+        u += (Math.random() - 0.5) * 0.9 * dt * 4;
+        v += (Math.random() - 0.5) * 1.6 * dt * 4;
+      }
+      var du = (pxPerSec / scale) * sp * dt;
+      var dv = 0;
+      if (u > 1) dv += 0.30 * cl * dt;
+      else if (u > 0.7) dv += 0.12 * cl * dt;
+      pt.u = u + du;
+      pt.v = v + dv;
+      var cpos = toCanvas(pt.u, pt.v);
+      if (!pt.init) { pt.px = cpos[0]; pt.py = cpos[1]; pt.init = true; }
+      if (sp > 1.25) ctx.strokeStyle = "rgba(255,107,44,0.55)";
+      else if (sp > 1.05) ctx.strokeStyle = "rgba(184,255,60,0.5)";
+      else ctx.strokeStyle = "rgba(94,234,255,0.42)";
+      ctx.beginPath();
+      ctx.moveTo(pt.px, pt.py);
+      ctx.lineTo(cpos[0], cpos[1]);
+      ctx.stroke();
+      pt.px = cpos[0]; pt.py = cpos[1];
+      if (pt.u > 1.7 || pt.u < -0.75 || Math.abs(pt.v) > 0.85) wtSpawn(pt, false);
+    }
+
+    /* inlet arrows */
+    ctx.fillStyle = "rgba(94,234,255,0.5)";
+    ctx.font = "10px monospace";
+    ctx.fillText("AIRFLOW " + S.V + " m/s", 10, 18);
+  }
+
+  var wtRAF = null;
+  function wtLoop() {
+    if (!wt$("wtOverlay") || !wt$("wtOverlay").classList.contains("open")) {
+      wtRAF = null;
+      return;
+    }
+    wtFrame();
+    wtRAF = requestAnimationFrame(wtLoop);
+  }
+  function wtKickLoop() {
+    if (!wtRAF) wtRAF = requestAnimationFrame(wtLoop);
+  }
+
+  /* ---------------- trials ---------------- */
+  function wtApplyTrial(id) {
+    S.trial = id;
+    var tr = null, k;
+    for (k = 0; k < WT_TRIALS.length; k++) if (WT_TRIALS[k].id === id) tr = WT_TRIALS[k];
+    if (tr) {
+      if (tr.locks.V != null) { S.V = tr.locks.V; }
+      if (tr.locks.rho != null) { S.rhoIdx = tr.locks.rho; }
+    }
+    var vIn = wt$("wtV"), rIn = wt$("wtRho");
+    if (vIn) {
+      vIn.value = S.V;
+      vIn.disabled = !!(tr && tr.locks.V != null);
+      wt$("wtVV").textContent = S.V + " m/s" + (vIn.disabled ? " (locked)" : "");
+    }
+    if (rIn) {
+      rIn.value = String(S.rhoIdx);
+      rIn.disabled = !!(tr && tr.locks.rho != null);
+    }
+    var cards = document.querySelectorAll(".wt-tcard");
+    for (k = 0; k < cards.length; k++) {
+      cards[k].classList.toggle("active", cards[k].getAttribute("data-t") === id);
+    }
+    var det = wt$("wtTrialDetail");
+    if (det) {
+      if (!tr) {
+        det.innerHTML = "<p class=\"wt-dim\">Free bench. No trial selected.</p>";
+      } else {
+        var h = "<h4>" + wtEsc(tr.name) + "</h4>";
+        h += "<p>" + wtEsc(tr.brief) + "</p>";
+        h += "<p class=\"wt-target\"><strong>Target:</strong> " + wtEsc(tr.target) + "</p>";
+        h += "<div class=\"wt-row\">";
+        h += "<button class=\"secondary\" id=\"wtRun\">Run trial</button>";
+        if (tr.id === "t3") {
+          h += "<button class=\"secondary\" id=\"wtSweep\">Sweep alpha -4 to 20</button>";
+          h += "<input id=\"wtReading\" type=\"number\" step=\"0.1\" min=\"-4\" max=\"20\" placeholder=\"stall angle, deg\" aria-label=\"Stall angle reading in degrees\">";
+          h += "<button class=\"secondary\" id=\"wtSubmit\">Submit reading</button>";
+        }
+        h += "</div><div id=\"wtResult\" class=\"wt-result\"></div>";
+        det.innerHTML = h;
+        wt$("wtRun").addEventListener("click", wtRunTrial);
+        if (tr.id === "t3") {
+          wt$("wtSweep").addEventListener("click", wtSweepAlpha);
+          wt$("wtSubmit").addEventListener("click", wtSubmitReading);
+        }
+      }
+    }
+    wtRefresh();
+  }
+
+  function wtRunTrial() {
+    var tr = null, k;
+    for (k = 0; k < WT_TRIALS.length; k++) if (WT_TRIALS[k].id === S.trial) tr = WT_TRIALS[k];
+    if (!tr || !tr.check) return;
+    var f = wtCurrent();
+    var rows = tr.check(f);
+    var all = true, h = "";
+    for (k = 0; k < rows.length; k++) {
+      if (!rows[k].ok) all = false;
+      h += "<div class=\"wt-crit " + (rows[k].ok ? "ok" : "bad") + "\">" +
+           (rows[k].ok ? "[PASS] " : "[FAIL] ") + wtEsc(rows[k].label) + "</div>";
+    }
+    var res = wt$("wtResult");
+    if (res) res.innerHTML = h;
+    if (all) {
+      S.passed[tr.id] = true;
+      wtMarkCards();
+      wtToast(tr.name + " passed");
+      if (S.passed.t1 && S.passed.t2 && S.passed.t3) {
+        var cb = wt$("wtCertBtn");
+        if (cb) cb.disabled = false;
+        wtToast("All three trials passed. Certificate unlocked.");
+      }
+    } else {
+      wtToast("Trial failed. Tune the section and run it again.");
+    }
+  }
+
+  function wtMarkCards() {
+    var cards = document.querySelectorAll(".wt-tcard");
+    var k;
+    for (k = 0; k < cards.length; k++) {
+      var id = cards[k].getAttribute("data-t");
+      var st = cards[k].querySelector(".wt-tstatus");
+      if (st) {
+        st.textContent = S.passed[id] ? "PASS" : "NOT FLOWN";
+        st.className = "wt-tstatus " + (S.passed[id] ? "ok" : "");
+      }
+    }
+  }
+
+  function wtSweepAlpha() {
+    if (S.sweepT) return;
+    S.alpha = -4;
+    var aIn = wt$("wtAlpha");
+    if (aIn) aIn.value = -4;
+    wtRefresh();
+    var start = null, DUR = 7000;
+    function step(ts) {
+      if (!S.sweepT) return;
+      if (!start) start = ts;
+      var r = Math.min(1, (ts - start) / DUR);
+      S.alpha = -4 + 24 * r;
+      var aIn2 = wt$("wtAlpha");
+      if (aIn2) aIn2.value = S.alpha;
+      var lab = wt$("wtAlphaV");
+      if (lab) lab.textContent = S.alpha.toFixed(1) + " deg";
+      wtRefresh();
+      if (r < 1) {
+        S.sweepT = requestAnimationFrame(step);
+      } else {
+        S.sweepT = null;
+        wtToast("Sweep done. Enter the stall angle you observed.");
+      }
+    }
+    S.sweepT = requestAnimationFrame(step);
+    wtToast("Sweeping angle of attack. Watch lift peak and fall.");
+  }
+
+  function wtSubmitReading() {
+    var inp = wt$("wtReading");
+    var res = wt$("wtResult");
+    var val = inp ? parseFloat(inp.value) : NaN;
+    if (isNaN(val)) {
+      if (res) res.innerHTML = "<div class=\"wt-crit bad\">[FAIL] Enter a number first.</div>";
+      return;
+    }
+    var truth = wtStallAngle(S.camber / 100);
+    var err = Math.abs(val - truth);
+    var h;
+    if (err <= 1.0) {
+      S.passed.t3 = true;
+      wtMarkCards();
+      h = "<div class=\"wt-crit ok\">[PASS] You reported " + val.toFixed(1) +
+          " deg. True stall angle: " + truth.toFixed(1) + " deg. Error " + err.toFixed(1) + " deg.</div>";
+      wtToast("Stall finder passed");
+      if (S.passed.t1 && S.passed.t2 && S.passed.t3) {
+        var cb = wt$("wtCertBtn");
+        if (cb) cb.disabled = false;
+        wtToast("All three trials passed. Certificate unlocked.");
+      }
+    } else {
+      h = "<div class=\"wt-crit bad\">[FAIL] You reported " + val.toFixed(1) +
+          " deg. True stall angle: " + truth.toFixed(1) + " deg. Off by " + err.toFixed(1) + " deg.</div>";
+      wtToast("Reading missed. Sweep again and watch closely.");
+    }
+    if (res) res.innerHTML = h;
+  }
+
+  /* ---------------- certificate and report ---------------- */
+  function wtConfigLine() {
+    return "camber " + S.camber.toFixed(1) + "%, thickness " + S.thick.toFixed(1) +
+      "%, chord " + S.chord.toFixed(2) + " m, alpha " + S.alpha.toFixed(1) +
+      " deg, " + S.V + " m/s, " + WT_RHOS[S.rhoIdx].n;
+  }
+
+  function wtCertificate() {
+    var f = wtCurrent();
+    var lines = [];
+    lines.push("==============================================");
+    lines.push("  WIND TUNNEL FLIGHT-TEST CERTIFICATE");
+    lines.push("  Garage Inventions Aerodynamics Bench");
+    lines.push("==============================================");
+    lines.push("Date : " + new Date().toISOString().slice(0, 10));
+    lines.push("");
+    lines.push("TRIAL 1 LIFT OFF    : PASS");
+    lines.push("TRIAL 2 ECON CRUISE : PASS");
+    lines.push("TRIAL 3 STALL FINDER: PASS");
+    lines.push("");
+    lines.push("Winning section : " + wtConfigLine());
+    lines.push("Final numbers   : CL " + f.cl.toFixed(3) + ", CD " + f.cd.toFixed(4) +
+               ", L/D " + f.ld.toFixed(2) + ", Re " + (f.Re / 1e6).toFixed(2) + "M");
+    lines.push("Best L/D this session: " + S.bestLD.toFixed(2));
+    lines.push("");
+    lines.push("Certified by the tunnel foreman. The air did its part.");
+    return lines.join("\n");
+  }
+
+  function wtReport() {
+    var f = wtCurrent();
+    var lines = [];
+    lines.push("WIND TUNNEL SHIFT REPORT");
+    lines.push("Date: " + new Date().toISOString().slice(0, 10));
+    lines.push("");
+    lines.push("Current section : " + wtConfigLine());
+    lines.push("Live numbers    : CL " + f.cl.toFixed(3) + ", CD " + f.cd.toFixed(4) +
+               ", Lift " + wtFmt(f.L) + " N, Drag " + wtFmt(f.D) + " N, L/D " + f.ld.toFixed(2));
+    lines.push("Flow state      : " + (f.stalled ? "STALLED" : "attached"));
+    lines.push("");
+    lines.push("Trials:");
+    lines.push("  LIFT OFF     : " + (S.passed.t1 ? "PASS" : "not passed"));
+    lines.push("  ECON CRUISE  : " + (S.passed.t2 ? "PASS" : "not passed"));
+    lines.push("  STALL FINDER : " + (S.passed.t3 ? "PASS" : "not passed"));
+    lines.push("");
+    lines.push("Best L/D this session: " + S.bestLD.toFixed(2));
+    return lines.join("\n");
+  }
+
+  /* ---------------- build ---------------- */
+  function wtSliderRow(id, label, min, max, step, val, unit) {
+    var row = wtEl("div", "wt-srow");
+    var lab = wtEl("label", "wt-slab", wtEsc(label) + " <span id=\"" + id + "V\">" +
+              wtEsc(val + unit) + "</span>");
+    lab.setAttribute("for", id);
+    var inp = document.createElement("input");
+    inp.type = "range";
+    inp.id = id;
+    inp.min = min; inp.max = max; inp.step = step; inp.value = val;
+    row.appendChild(lab);
+    row.appendChild(inp);
+    return row;
+  }
+
+  function wtBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || wt$("wtBtn")) return;
+
+    var css = [
+      ".wt-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.93);display:none;align-items:center;justify-content:center;padding:14px;}",
+      ".wt-overlay.open{display:flex;}",
+      ".wt-panel{width:min(1020px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--cyan);padding:16px;}",
+      ".wt-panel h3{font-family:'Chakra Petch',sans-serif;margin:0 0 6px;font-size:24px;letter-spacing:.02em;text-transform:uppercase;color:var(--cyan);}",
+      ".wt-sub{font-size:12px;line-height:1.7;color:#9fb3ae;margin:0 0 12px;}",
+      ".wt-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}",
+      ".wt-canvasbox{border:1px solid var(--line);background:#060d0e;position:relative;}",
+      "#wtCanvas{width:100%;display:block;touch-action:pan-y;}",
+      "#wtStallBanner{display:none;position:absolute;top:8px;left:50%;transform:translateX(-50%);background:rgba(255,60,30,.92);color:#0a0a0a;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.12em;padding:6px 14px;text-transform:uppercase;}",
+      ".wt-read{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;}",
+      ".wt-tile{border:1px solid var(--line);background:var(--panel-2);padding:8px 10px;min-width:0;}",
+      ".wt-tile h5{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+      ".wt-tile p{margin:0;font-size:15px;color:var(--ink);font-family:monospace;}",
+      ".wt-srow{margin:10px 0;}",
+      ".wt-slab{display:flex;justify-content:space-between;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#9fb3ae;margin-bottom:4px;}",
+      ".wt-slab span{color:var(--acid);font-family:monospace;}",
+      ".wt-srow input[type=range]{width:100%;min-height:44px;}",
+      ".wt-srow select{width:100%;background:var(--black);border:1px solid var(--line);color:var(--ink);padding:10px;font:inherit;font-size:12px;min-height:44px;}",
+      ".wt-hint{border:1px dashed var(--orange);padding:10px 12px;margin:12px 0;font-size:12px;line-height:1.7;color:var(--ink);background:rgba(255,107,44,.05);}",
+      ".wt-tcards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0;}",
+      ".wt-tcard{border:1px solid var(--line);padding:10px 12px;background:var(--panel-2);}",
+      ".wt-tcard.active{border-color:var(--acid);}",
+      ".wt-tcard h4{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-size:14px;text-transform:uppercase;color:var(--acid);}",
+      ".wt-tcard p{margin:0 0 8px;font-size:11px;line-height:1.6;color:#9fb3ae;}",
+      ".wt-tstatus{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#72827f;margin-bottom:8px;}",
+      ".wt-tstatus.ok{color:var(--acid);}",
+      ".wt-tcard button{min-height:44px;width:100%;}",
+      ".wt-detail{border:1px solid var(--line);padding:12px 14px;margin-bottom:12px;background:rgba(16,23,22,.94);}",
+      ".wt-detail h4{margin:0 0 6px;font-family:'Chakra Petch',sans-serif;font-size:16px;text-transform:uppercase;color:var(--cyan);}",
+      ".wt-detail p{margin:0 0 8px;font-size:12px;line-height:1.7;color:var(--ink);}",
+      ".wt-target{color:var(--orange);}",
+      ".wt-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}",
+      ".wt-row .secondary{min-height:44px;}",
+      ".wt-row input[type=number]{background:var(--black);border:1px solid var(--line);color:var(--ink);padding:10px;font:inherit;font-size:12px;min-height:44px;width:150px;}",
+      ".wt-result{margin-top:10px;}",
+      ".wt-crit{font-size:12px;font-family:monospace;padding:6px 8px;margin-bottom:6px;border:1px solid var(--line);}",
+      ".wt-crit.ok{border-color:var(--acid);color:var(--acid);}",
+      ".wt-crit.bad{border-color:#ff5a3c;color:#ff8a70;}",
+      ".wt-dim{color:#72827f;font-size:12px;}",
+      ".wt-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;}",
+      ".wt-foot .secondary{min-height:44px;}",
+      "@media (max-width:900px){.wt-grid{grid-template-columns:1fr;}.wt-read{grid-template-columns:repeat(2,minmax(0,1fr));}.wt-tcards{grid-template-columns:1fr;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = wtEl("button", "secondary", "Run the Wind Tunnel");
+    b.id = "wtBtn";
+    box.appendChild(b);
+
+    var ov = wtEl("div", "wt-overlay");
+    ov.id = "wtOverlay";
+    var panel = wtEl("div", "wt-panel");
+
+    panel.appendChild(wtEl("h3", null, "The Wind Tunnel"));
+    panel.appendChild(wtEl("p", "wt-sub",
+      "Aerodynamics bench. Shape a wing section, set the airflow, and watch live lift, drag, " +
+      "and streamline speed with thin airfoil theory under the hood. Three flight-test trials " +
+      "wait below. Everything runs in your browser, no server, no tracking."));
+
+    var grid = wtEl("div", "wt-grid");
+
+    /* left: tunnel view + readouts */
+    var left = wtEl("div");
+    var cbox = wtEl("div", "wt-canvasbox");
+    cv = document.createElement("canvas");
+    cv.id = "wtCanvas";
+    cbox.appendChild(cv);
+    var banner = wtEl("div", null, "Stall: flow separated");
+    banner.id = "wtStallBanner";
+    cbox.appendChild(banner);
+    left.appendChild(cbox);
+
+    var read = wtEl("div", "wt-read");
+    var tiles = [
+      ["wtCL", "Lift coeff CL", "0.000"],
+      ["wtCD", "Drag coeff CD", "0.0000"],
+      ["wtLift", "Lift", "0 N"],
+      ["wtDrag", "Drag", "0 N"],
+      ["wtLD", "L / D", "0.00"],
+      ["wtRe", "Reynolds", "0 M"],
+      ["wtA0", "Zero-lift angle", "0 deg"],
+      ["wtStallA", "Stall angle", "0 deg"],
+      ["wtBest", "Best L/D session", "0.00"]
+    ];
+    var ti;
+    for (ti = 0; ti < tiles.length; ti++) {
+      var tile = wtEl("div", "wt-tile",
+        "<h5>" + wtEsc(tiles[ti][1]) + "</h5><p id=\"" + tiles[ti][0] + "\">" + tiles[ti][2] + "</p>");
+      read.appendChild(tile);
+    }
+    left.appendChild(read);
+    grid.appendChild(left);
+
+    /* right: controls */
+    var right = wtEl("div");
+    right.appendChild(wtSliderRow("wtCamber", "Camber", 0, 8, 0.5, S.camber, " %"));
+    right.appendChild(wtSliderRow("wtThick", "Thickness", 4, 16, 0.5, S.thick, " %"));
+    right.appendChild(wtSliderRow("wtChord", "Chord", 0.5, 3, 0.1, S.chord, " m"));
+    right.appendChild(wtSliderRow("wtAlpha", "Angle of attack", -4, 20, 0.5, S.alpha, " deg"));
+    right.appendChild(wtSliderRow("wtV", "Airspeed", 10, 120, 1, S.V, " m/s"));
+    var rhoRow = wtEl("div", "wt-srow");
+    var rhoLab = wtEl("label", "wt-slab", "Altitude (air density)");
+    rhoLab.setAttribute("for", "wtRho");
+    var rhoSel = document.createElement("select");
+    rhoSel.id = "wtRho";
+    var ri;
+    for (ri = 0; ri < WT_RHOS.length; ri++) {
+      var op = document.createElement("option");
+      op.value = String(ri);
+      op.textContent = WT_RHOS[ri].n + " (" + WT_RHOS[ri].v.toFixed(3) + " kg/m3)";
+      rhoSel.appendChild(op);
+    }
+    rhoRow.appendChild(rhoLab);
+    rhoRow.appendChild(rhoSel);
+    right.appendChild(rhoRow);
+    grid.appendChild(right);
+    panel.appendChild(grid);
+
+    var hint = wtEl("p", "wt-hint", "");
+    hint.id = "wtHint";
+    panel.appendChild(hint);
+
+    /* trials */
+    panel.appendChild(wtEl("h3", null, "Flight-test trials"));
+    var tcards = wtEl("div", "wt-tcards");
+    var k;
+    for (k = 0; k < WT_TRIALS.length; k++) {
+      (function (tr) {
+        var card = wtEl("div", "wt-tcard");
+        card.setAttribute("data-t", tr.id);
+        card.appendChild(wtEl("h4", null, wtEsc(tr.name)));
+        card.appendChild(wtEl("div", "wt-tstatus", "NOT FLOWN"));
+        card.appendChild(wtEl("p", null, wtEsc(tr.target)));
+        var fly = wtEl("button", "secondary", "Fly trial");
+        fly.addEventListener("click", function () { wtApplyTrial(tr.id); });
+        card.appendChild(fly);
+        tcards.appendChild(card);
+      })(WT_TRIALS[k]);
+    }
+    panel.appendChild(tcards);
+
+    var det = wtEl("div", "wt-detail", "<p class=\"wt-dim\">Free bench. No trial selected.</p>");
+    det.id = "wtTrialDetail";
+    panel.appendChild(det);
+
+    /* footer */
+    var foot = wtEl("div", "wt-foot");
+    var certBtn = wtEl("button", "secondary", "Download flight-test certificate");
+    certBtn.id = "wtCertBtn";
+    certBtn.disabled = true;
+    certBtn.addEventListener("click", function () {
+      if (!(S.passed.t1 && S.passed.t2 && S.passed.t3)) return;
+      wtDownload("wind-tunnel-certificate.txt", wtCertificate());
+      wtToast("Certificate downloaded");
+    });
+    var repBtn = wtEl("button", "secondary", "Download shift report");
+    repBtn.addEventListener("click", function () {
+      wtDownload("wind-tunnel-shift-report.txt", wtReport());
+      wtToast("Shift report downloaded");
+    });
+    var closeBtn = wtEl("button", "secondary", "Close");
+    closeBtn.addEventListener("click", wtClose);
+    foot.appendChild(certBtn);
+    foot.appendChild(repBtn);
+    foot.appendChild(closeBtn);
+    panel.appendChild(foot);
+
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    /* particles */
+    for (var pi = 0; pi < WT_NP; pi++) {
+      var pp = {};
+      wtSpawn(pp, true);
+      parts.push(pp);
+    }
+
+    /* control wiring */
+    function bindSlider(id, key, unit, fmt) {
+      var inp = wt$(id);
+      inp.addEventListener("input", function () {
+        if (S.sweepT && id === "wtAlpha") {
+          cancelAnimationFrame(S.sweepT);
+          S.sweepT = null;
+        }
+        S[key] = parseFloat(inp.value);
+        wt$(id + "V").textContent = fmt(S[key]) + unit;
+        wtRefresh();
+      });
+    }
+    bindSlider("wtCamber", "camber", " %", function (v) { return v.toFixed(1); });
+    bindSlider("wtThick", "thick", " %", function (v) { return v.toFixed(1); });
+    bindSlider("wtChord", "chord", " m", function (v) { return v.toFixed(1); });
+    bindSlider("wtAlpha", "alpha", " deg", function (v) { return v.toFixed(1); });
+    bindSlider("wtV", "V", " m/s", function (v) { return String(Math.round(v)); });
+    rhoSel.addEventListener("change", function () {
+      S.rhoIdx = parseInt(rhoSel.value, 10) || 0;
+      wtRefresh();
+    });
+
+    window.addEventListener("resize", wtSizeCanvas);
+
+    function wtClose() {
+      if (S.sweepT) { cancelAnimationFrame(S.sweepT); S.sweepT = null; }
+      ov.classList.remove("open");
+    }
+    ov.addEventListener("click", function (e) { if (e.target === ov) wtClose(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) wtClose();
+    });
+
+    b.addEventListener("click", function () {
+      wtSizeCanvas();
+      ov.classList.add("open");
+      wtRefresh();
+      wtKickLoop();
+    });
+
+    wtRefresh();
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", wtBuild);
+    } else {
+      wtBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      WT: {
+        alpha0: wtAlpha0,
+        stallAngle: wtStallAngle,
+        cl: wtCL,
+        cd: wtCD,
+        forces: wtForces,
+        airfoil: wtAirfoil,
+        trials: WT_TRIALS
+      }
+    };
+  }
+
+})();
