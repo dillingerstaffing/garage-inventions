@@ -1843,4 +1843,414 @@
     slBuild();
   }
 
+
+  /* ============================================================
+     10. THE GOVERNOR: PID tuning bench (playable)
+     A real discrete PID loop drives a second-order plant with
+     actuator saturation and anti-windup. Tune Kp, Ki, Kd, start
+     the trial, and hold the response inside the 4% band for
+     1.5 seconds with under 12% overshoot before the 12s shift
+     ends. Win and the machine earns a tuning certificate.
+     ============================================================ */
+  var GV_MACHINES = [
+    { name: "Conveyor 7", unit: "m/s", r: 2.4, wn: 2.2, zeta: 0.35, blurb: "Belt drive, lightly damped. Likes to overshoot the mark." },
+    { name: "Hydraulic lift, bay 2", unit: "m", r: 1.5, wn: 1.1, zeta: 0.8, blurb: "Slow and heavy. Forgiving, but do not fall asleep on it." },
+    { name: "Lathe spindle", unit: "rpm", r: 900, wn: 3.0, zeta: 0.18, blurb: "Fast, twitchy, barely damped. Respect the derivative term." },
+    { name: "Paint mixer, drum B", unit: "rpm", r: 320, wn: 1.6, zeta: 0.5, blurb: "Viscous load. Steady, but it punishes greedy integral gain." },
+    { name: "Dust collector fan", unit: "cfm x100", r: 4.8, wn: 2.6, zeta: 0.25, blurb: "Big inertia, thin air. Overshoots if you blink." },
+    { name: "Parts washer pump", unit: "psi", r: 65, wn: 3.4, zeta: 0.12, blurb: "The wild one. Almost no natural damping at all." }
+  ];
+  var gvs = null;
+
+  function gvMakeState(m, kp, ki, kd) {
+    return {
+      m: m, kp: kp, ki: ki, kd: kd,
+      t: 0, y: 0.02 * m.r, v: 0, integ: 0, prevYn: 0.02,
+      maxY: 0.02 * m.r, bandT: 0, uNow: 0,
+      won: false, failed: false, tSettle: 0, reason: "",
+      trace: []
+    };
+  }
+
+  function gvStep(s, dt) {
+    var en = (s.m.r - s.y) / s.m.r;
+    var P = s.kp * en;
+    s.integ += en * dt;
+    var I = s.ki * s.integ;
+    var yn = s.y / s.m.r;
+    var D = -s.kd * ((yn - s.prevYn) / dt);
+    var u = P + I + D;
+    if ((u > 1.25 && en > 0) || (u < 0 && en < 0)) {
+      s.integ -= en * dt; I = s.ki * s.integ; u = P + I + D;
+    }
+    u = Math.max(0, Math.min(1.25, u));
+    s.uNow = u;
+    var acc = s.m.wn * s.m.wn * (u * 1.25 * s.m.r - s.y) - 2 * s.m.zeta * s.m.wn * s.v;
+    s.v += acc * dt;
+    s.prevYn = yn;
+    s.y += s.v * dt;
+    s.t += dt;
+    if (s.y > s.maxY) s.maxY = s.y;
+    if (Math.abs(en) <= 0.04) s.bandT += dt; else s.bandT = 0;
+    if (s.bandT >= 1.5 && s.t >= 1.0) { s.won = true; s.tSettle = s.t - 1.5; }
+    if (s.y > 3 * s.m.r || s.y < -s.m.r) { s.failed = true; s.reason = "blowout"; }
+    if (s.trace.length < 2400) s.trace.push([s.t, s.y, u]);
+  }
+
+  function gvOvershoot(s) { return Math.max(0, (s.maxY - s.m.r) / s.m.r); }
+
+  function gvReadGains() {
+    return {
+      kp: parseFloat($("gvKp").value),
+      ki: parseFloat($("gvKi").value),
+      kd: parseFloat($("gvKd").value)
+    };
+  }
+
+  function gvSetGains(g) {
+    $("gvKp").value = g.kp; $("gvKi").value = g.ki; $("gvKd").value = g.kd;
+    gvGainLabels();
+  }
+
+  function gvGainLabels() {
+    $("gvKpV").textContent = parseFloat($("gvKp").value).toFixed(2);
+    $("gvKiV").textContent = parseFloat($("gvKi").value).toFixed(2);
+    $("gvKdV").textContent = parseFloat($("gvKd").value).toFixed(2);
+  }
+
+  function gvLockControls(locked) {
+    var ids = ["gvKp", "gvKi", "gvKd", "gvStart", "gvNew", "gvGuess"];
+    for (var i = 0; i < ids.length; i++) $(ids[i]).disabled = locked;
+  }
+
+  function gvNewMachine() {
+    gvHalt();
+    var m = GV_MACHINES[Math.floor(Math.random() * GV_MACHINES.length)];
+    gvs.machine = m;
+    $("gvMachine").textContent = m.name;
+    $("gvTarget").textContent = m.r + " " + m.unit;
+    $("gvBlurb").textContent = m.blurb;
+    $("gvResult").textContent = "";
+    $("gvResult").className = "gv-result";
+    $("gvCertBtn").disabled = true;
+    var st = gvMakeState(m, 0, 0, 0);
+    gvs.preview = st;
+    gvDrawPreview();
+    gvHud(st, 0);
+  }
+
+  function gvHalt() {
+    if (gvs && gvs.raf) { cancelAnimationFrame(gvs.raf); gvs.raf = 0; }
+    if (gvs) gvs.running = false;
+    gvLockControls(false);
+  }
+
+  function gvStart() {
+    if (gvs.running) return;
+    var g = gvReadGains();
+    var st = gvMakeState(gvs.machine, g.kp, g.ki, g.kd);
+    gvs.state = st;
+    gvs.running = true;
+    gvs.lastNow = 0;
+    $("gvResult").textContent = "";
+    $("gvResult").className = "gv-result";
+    $("gvCertBtn").disabled = true;
+    gvLockControls(true);
+    $("gvStop").disabled = false;
+    gvs.raf = requestAnimationFrame(gvLoop);
+  }
+
+  function gvStop(silent) {
+    gvHalt();
+    if (!silent) {
+      $("gvResult").textContent = "Trial aborted. The machine keeps its secrets.";
+      $("gvResult").className = "gv-result fail";
+    }
+  }
+
+  function gvLoop(now) {
+    if (!gvs.running) return;
+    if (!gvs.lastNow) gvs.lastNow = now;
+    var realDt = Math.min(0.1, (now - gvs.lastNow) / 1000);
+    gvs.lastNow = now;
+    var simBudget = realDt * gvs.speed;
+    var s = gvs.state;
+    var dt = 0.01;
+    while (simBudget > 0 && !s.won && !s.failed && s.t < 12) {
+      var h = Math.min(dt, simBudget);
+      gvStep(s, h);
+      simBudget -= h;
+    }
+    gvDraw(s);
+    gvHud(s, gvOvershoot(s));
+    var done = s.won || s.failed || s.t >= 12;
+    if (!done) {
+      gvs.raf = requestAnimationFrame(gvLoop);
+    } else {
+      gvs.running = false;
+      gvLockControls(false);
+      var ov = gvOvershoot(s);
+      if (s.won && ov <= 0.12) gvFinish(true, s);
+      else gvFinish(false, s);
+    }
+  }
+
+  function gvFinish(won, s) {
+    var ov = gvOvershoot(s);
+    var r = $("gvResult");
+    if (won) {
+      r.textContent = "TUNED. Settled in " + s.tSettle.toFixed(2) + "s with " +
+        (ov * 100).toFixed(1) + "% overshoot. The machine hums your name.";
+      r.className = "gv-result win";
+      $("gvCertBtn").disabled = false;
+      gvs.cert = {
+        settle: s.tSettle, ov: ov,
+        kp: s.kp, ki: s.ki, kd: s.kd, machine: s.m.name
+      };
+      var v = (typeof currentInvention === "function") ? currentInvention() : null;
+      window.__govCert = "governor-tuned (" + (v ? v.code : "bench") + ") " + new Date().toISOString().slice(0, 10);
+      var bk = s.m.name;
+      if (!gvs.best[bk] || s.tSettle < gvs.best[bk]) {
+        gvs.best[bk] = s.tSettle;
+        toast("New best settle on " + bk + ": " + s.tSettle.toFixed(2) + "s.");
+      } else {
+        toast("Machine tuned. Certificate unlocked.");
+      }
+    } else {
+      var why = s.failed
+        ? "The loop went unstable and the response blew past the red line."
+        : "The 12 second shift ended before the response settled in the band.";
+      r.textContent = "NOT TUNED. " + why + " Overshoot hit " + (ov * 100).toFixed(1) + "%.";
+      r.className = "gv-result fail";
+      toast("Trial failed. Adjust the gains and go again.");
+    }
+  }
+
+  function gvCertificate() {
+    if (!gvs.cert) return;
+    var c = gvs.cert;
+    var v = (typeof currentInvention === "function") ? currentInvention() : null;
+    var nm = v ? v.name : "unnamed prototype";
+    var code = v ? v.code : "n/a";
+    var txt =
+      "GOVERNOR TUNING CERTIFICATE\n" +
+      "Garage Inventions PID Bench\n" +
+      "================================\n" +
+      "Invention : " + nm + " (" + code + ")\n" +
+      "Machine   : " + c.machine + "\n" +
+      "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Result    : LOOP TUNED, 4% BAND HELD 1.5s\n" +
+      "Gains     : Kp=" + c.kp.toFixed(2) + " Ki=" + c.ki.toFixed(2) + " Kd=" + c.kd.toFixed(2) + "\n" +
+      "Settle    : " + c.settle.toFixed(2) + "s\n" +
+      "Overshoot : " + (c.ov * 100).toFixed(1) + "%\n" +
+      "\nCertified by the bench. Reality is optional. Utility is not.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "governor-tuning-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    toast("Tuning certificate downloaded");
+  }
+
+  function gvHud(s, ov) {
+    $("gvClock").textContent = s.t.toFixed(1) + "s / 12s";
+    $("gvOv").textContent = (ov * 100).toFixed(1) + "%";
+    $("gvY").textContent = s.y.toFixed(2) + " " + s.m.unit;
+    $("gvBand").textContent = Math.min(s.bandT, 1.5).toFixed(1) + "s / 1.5s";
+    var bk = s.m.name;
+    $("gvBest").textContent = gvs.best[bk] ? gvs.best[bk].toFixed(2) + "s" : "--";
+    var uPct = Math.round((s.uNow / 1.25) * 100);
+    $("gvDriveFill").style.width = uPct + "%";
+    $("gvDriveTxt").textContent = "drive " + uPct + "%";
+    var inBand = Math.abs(s.y - s.m.r) / s.m.r <= 0.04;
+    $("gvStatus").textContent = s.won ? "IN BAND" : (inBand ? "band edge" : "hunting");
+  }
+
+  function gvDrawPreview() {
+    var cv = $("gvCanvas");
+    var ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    var m = gvs.machine;
+    var L = 46, R = 12, T = 14, B = 26;
+    var yMax = 1.4 * m.r;
+    function X(t) { return L + (t / 12) * (W - L - R); }
+    function Y(v) { return H - B - (v / yMax) * (H - T - B); }
+    ctx.fillStyle = "rgba(199,255,56,.07)";
+    ctx.fillRect(L, Y(m.r * 1.04), W - L - R, Y(m.r * 0.96) - Y(m.r * 1.04));
+    ctx.strokeStyle = "#c7ff38"; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(L, Y(m.r)); ctx.lineTo(W - R, Y(m.r)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#7c8d89"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+    ctx.fillText("target " + m.r + " " + m.unit, L + 4, Y(m.r) - 6);
+    ctx.fillText("0", 8, Y(0) + 3);
+    ctx.fillText("4% band", L + 4, Y(m.r * 1.04) - 4);
+    ctx.fillStyle = "#58e4e8";
+    ctx.fillText("Set the gains, then start the trial.", L, H - 8);
+  }
+
+  function gvDraw(s) {
+    var cv = $("gvCanvas");
+    var ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    var m = s.m;
+    var L = 46, R = 12, T = 14, B = 26;
+    var peak = m.r * 1.4;
+    for (var i = 0; i < s.trace.length; i += 12) {
+      if (s.trace[i][1] * 1.08 > peak) peak = s.trace[i][1] * 1.08;
+    }
+    function X(t) { return L + (t / 12) * (W - L - R); }
+    function Y(v) { return H - B - (v / peak) * (H - T - B); }
+    ctx.strokeStyle = "#1c2a28"; ctx.lineWidth = 1;
+    ctx.fillStyle = "#7c8d89"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+    for (var tt = 0; tt <= 12; tt += 2) {
+      ctx.beginPath(); ctx.moveTo(X(tt), T); ctx.lineTo(X(tt), H - B); ctx.stroke();
+      ctx.fillText(tt + "s", X(tt), H - 8);
+    }
+    ctx.fillStyle = "rgba(199,255,56,.07)";
+    ctx.fillRect(L, Y(m.r * 1.04), W - L - R, Y(m.r * 0.96) - Y(m.r * 1.04));
+    ctx.strokeStyle = "#c7ff38"; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(L, Y(m.r)); ctx.lineTo(W - R, Y(m.r)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "rgba(255,70,104,.55)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(L, Y(3 * m.r)); ctx.lineTo(W - R, Y(3 * m.r)); ctx.stroke();
+    ctx.fillStyle = "#ff4668"; ctx.textAlign = "left";
+    ctx.fillText("blowout line", L + 4, Y(3 * m.r) - 4);
+    ctx.strokeStyle = "#58e4e8"; ctx.lineWidth = 2; ctx.beginPath();
+    var started = false;
+    for (var j = 0; j < s.trace.length; j++) {
+      var px = X(s.trace[j][0]), py = Y(s.trace[j][1]);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    if (s.trace.length) {
+      var last = s.trace[s.trace.length - 1];
+      ctx.fillStyle = "#58e4e8";
+      ctx.beginPath(); ctx.arc(X(last[0]), Y(last[1]), 4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = "#7c8d89"; ctx.textAlign = "left";
+    ctx.fillText("target " + m.r + " " + m.unit, L + 4, Y(m.r) - 6);
+  }
+
+  function gvBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || $("governorBtn")) return;
+
+    var css = [
+      ".gv-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".gv-overlay.open{display:flex;}",
+      ".gv-panel{width:min(780px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+      ".gv-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".gv-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+      ".gv-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".gv-tile{border:1px solid var(--line);padding:8px 10px;background:var(--panel-2);min-width:0;}",
+      ".gv-tile h5{margin:0 0 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--acid);font-weight:600;}",
+      ".gv-tile p{margin:0;font-size:13px;font-family:monospace;color:var(--ink);}",
+      ".gv-tile p.dim{font-size:10px;color:#7c8d89;}",
+      "#gvCanvas{width:100%;height:auto;display:block;background:#060b0c;border:1px solid var(--line);}",
+      ".gv-drive{display:flex;align-items:center;gap:10px;margin:10px 0;}",
+      ".gv-drivetrack{flex:1;height:14px;background:#101716;border:1px solid var(--line);}",
+      "#gvDriveFill{height:100%;width:0;background:var(--orange);transition:width .08s linear;}",
+      ".gv-drive span{font-size:11px;color:var(--ink);white-space:nowrap;font-family:monospace;}",
+      ".gv-gains{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:10px 0;}",
+      ".gv-gain{border:1px solid var(--line);padding:10px;background:var(--panel-2);}",
+      ".gv-gain h5{margin:0 0 2px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+      ".gv-gain p{margin:0 0 6px;font-size:10px;color:#7c8d89;}",
+      ".gv-gain .val{font-family:monospace;font-size:15px;color:var(--ink);}",
+      ".gv-gain input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+      ".gv-btns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;}",
+      ".gv-btns button{min-height:48px;padding:12px 8px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);}",
+      ".gv-btns button:disabled{opacity:.35;cursor:default;}",
+      "#gvStart{border-color:var(--acid);color:var(--acid);}",
+      ".gv-result{margin-top:10px;padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;}",
+      ".gv-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".gv-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".gv-foot{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}",
+      ".gv-foot .secondary{flex:1;min-height:44px;}",
+      "@media (max-width:640px){.gv-tiles{grid-template-columns:repeat(2,minmax(0,1fr));}.gv-gains{grid-template-columns:1fr;}.gv-btns{grid-template-columns:repeat(2,minmax(0,1fr));}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = el("button", "secondary", "Tune the Governor");
+    b.id = "governorBtn";
+    b.addEventListener("click", function () { $("gvOverlay").classList.add("open"); });
+    box.appendChild(b);
+
+    var ov = el("div", "gv-overlay");
+    ov.id = "gvOverlay";
+    ov.innerHTML =
+      '<div class="gv-panel" role="dialog" aria-label="The Governor PID tuning bench">' +
+      "<h3>The Governor</h3>" +
+      '<p class="gv-sub">A live PID loop on real shop machinery. Tune Kp, Ki, Kd, start the trial, hold the trace inside the 4% band for 1.5s with under 12% overshoot. The shift ends at 12s.</p>' +
+      '<div class="gv-tiles">' +
+      '<div class="gv-tile"><h5>Machine</h5><p id="gvMachine">--</p><p class="dim" id="gvBlurb"></p></div>' +
+      '<div class="gv-tile"><h5>Target</h5><p id="gvTarget">--</p><p class="dim" id="gvY">--</p></div>' +
+      '<div class="gv-tile"><h5>Clock</h5><p id="gvClock">0.0s / 12s</p><p class="dim" id="gvStatus">idle</p></div>' +
+      '<div class="gv-tile"><h5>Overshoot</h5><p id="gvOv">0.0%</p><p class="dim">limit 12%</p></div>' +
+      '<div class="gv-tile"><h5>Band hold</h5><p id="gvBand">0.0s / 1.5s</p><p class="dim">inside 4%</p></div>' +
+      '<div class="gv-tile"><h5>Best settle</h5><p id="gvBest">--</p><p class="dim">this machine</p></div>' +
+      "</div>" +
+      '<canvas id="gvCanvas" width="720" height="420"></canvas>' +
+      '<div class="gv-drive"><div class="gv-drivetrack"><div id="gvDriveFill"></div></div><span id="gvDriveTxt">drive 0%</span></div>' +
+      '<div class="gv-gains">' +
+      '<div class="gv-gain"><h5>Kp <span class="val" id="gvKpV">1.00</span></h5><p>Proportional: muscle. Too much and it oscillates.</p><input type="range" id="gvKp" min="0" max="6" step="0.05" value="1"></div>' +
+      '<div class="gv-gain"><h5>Ki <span class="val" id="gvKiV">0.50</span></h5><p>Integral: memory. Kills steady error, feeds overshoot.</p><input type="range" id="gvKi" min="0" max="4" step="0.05" value="0.5"></div>' +
+      '<div class="gv-gain"><h5>Kd <span class="val" id="gvKdV">0.30</span></h5><p>Derivative: brakes. Calms the twitchy machines.</p><input type="range" id="gvKd" min="0" max="4" step="0.05" value="0.3"></div>' +
+      "</div>" +
+      '<div class="gv-btns">' +
+      '<button id="gvStart">Start trial</button>' +
+      '<button id="gvStop" disabled>Stop</button>' +
+      '<button id="gvSpeed">Speed 1x</button>' +
+      '<button id="gvNew">New machine</button>' +
+      '<button id="gvGuess">Shop guess</button>' +
+      '<button id="gvZero">Zero gains</button>' +
+      "</div>" +
+      '<div class="gv-result" id="gvResult"></div>' +
+      '<div class="gv-foot">' +
+      '<button class="secondary" id="gvCertBtn" disabled>Download certificate</button>' +
+      '<button class="secondary" id="gvClose">Close</button>' +
+      "</div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    gvs = { machine: null, running: false, raf: 0, speed: 1, cert: null, best: {}, state: null, preview: null, lastNow: 0 };
+
+    $("gvKp").addEventListener("input", gvGainLabels);
+    $("gvKi").addEventListener("input", gvGainLabels);
+    $("gvKd").addEventListener("input", gvGainLabels);
+    $("gvStart").addEventListener("click", gvStart);
+    $("gvStop").addEventListener("click", function () { gvStop(false); });
+    $("gvSpeed").addEventListener("click", function () {
+      gvs.speed = (gvs.speed === 1) ? 4 : 1;
+      $("gvSpeed").textContent = "Speed " + gvs.speed + "x";
+    });
+    $("gvNew").addEventListener("click", gvNewMachine);
+    $("gvGuess").addEventListener("click", function () {
+      gvSetGains({ kp: 1.0, ki: 0.5, kd: 0.3 });
+      toast("Shop guess loaded. It works, slowly. Beat it.");
+    });
+    $("gvZero").addEventListener("click", function () {
+      gvSetGains({ kp: 0, ki: 0, kd: 0 });
+      toast("Gains zeroed. The machine does nothing, reliably.");
+    });
+    $("gvCertBtn").addEventListener("click", gvCertificate);
+    $("gvClose").addEventListener("click", function () { gvStop(true); $("gvOverlay").classList.remove("open"); });
+    ov.addEventListener("click", function (e) { if (e.target === ov) { gvStop(true); ov.classList.remove("open"); } });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) { gvStop(true); ov.classList.remove("open"); }
+    });
+
+    gvNewMachine();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", gvBuild);
+  } else {
+    gvBuild();
+  }
+
 })();

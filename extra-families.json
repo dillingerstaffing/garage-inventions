@@ -110,5 +110,21 @@
     "power": "A 9V battery that has been in service since the previous administration.",
     "failure": "A particularly decisive drawer slam can register as a regional earthquake.",
     "transcript": "DAY 4: The drawer reports three tremors. Investigation reveals a cat. <strong>Conclusion: the cat is an unreliable narrator.</strong>"
+  },
+  {
+    "names": [
+      "Setpoint Somnambulist",
+      "Overshoot Accountant",
+      "Integral Windup"
+    ],
+    "purposes": [
+      "Holds conveyor seven at exactly 2.4 meters per second through lunch rushes, power dips, and one memorable forklift incident.",
+      "Logs every overshoot event with a timestamp and a short, judgmental note about the operator's gain choices.",
+      "Retires gracefully when the loop goes unstable, leaving a written apology and a cold cup of coffee."
+    ],
+    "built": "A salvaged PID module from a decommissioned bottling plant, three trim pots with the knobs missing, and a laminated tuning chart from 1987.",
+    "power": "24V control loop with a 4 to 20 milliamp soul.",
+    "failure": "Integral windup during a sensor outage can command full drive for up to nine seconds, which the manual describes as 'enthusiasm'.",
+    "transcript": "Set Kp to 2.4 and the belt stopped arguing. <strong>Settle time 0.82 seconds.</strong> The foreman nodded once, which around here is a standing ovation."
   }
 ]
