@@ -12445,3 +12445,641 @@ if (typeof module !== "undefined" && module.exports) {
   }
 
 })();
+/* ============================================================
+   THE CACHE FORGE
+   An RV32I L1 data-cache tuning bench: real set-associative cache
+   simulation with LRU replacement, animated set grid, address
+   breakdown, AMAT scoring, three qualification trials, and a
+   downloadable Cache Architect certificate.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------------- tiny helpers (module-local) ---------------- */
+  function cf$(id) { return document.getElementById(id); }
+  function cfEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function cfEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function cfToast(msg) {
+    var t = cf$("cfToastBox");
+    if (!t) {
+      t = cfEl("div", "cf-toast");
+      t.id = "cfToastBox";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 2200);
+  }
+  function cfHex(n, pad) {
+    var h = (n >>> 0).toString(16).toUpperCase();
+    while (h.length < pad) h = "0" + h;
+    return "0x" + h;
+  }
+
+  /* ---------------- simulation core (pure, testable) ---------------- */
+  function cfLog2i(x) { var n = 0; while ((1 << n) < x) n++; return n; }
+
+  function cfNewCache(sizeKB, assoc, blockB) {
+    var sets = (sizeKB * 1024) / (assoc * blockB);
+    var lines = [];
+    for (var s = 0; s < sets; s++) {
+      var ways = [];
+      for (var w = 0; w < assoc; w++) ways.push({ tag: -1, age: 0 });
+      lines.push(ways);
+    }
+    return { sizeKB: sizeKB, assoc: assoc, blockB: blockB, sets: sets, lines: lines, tick: 0 };
+  }
+
+  function cfAccess(c, addr) {
+    var blockAddr = Math.floor(addr / c.blockB);
+    var set = blockAddr % c.sets;
+    var tag = Math.floor(blockAddr / c.sets);
+    var ways = c.lines[set];
+    c.tick++;
+    for (var w = 0; w < ways.length; w++) {
+      if (ways[w].tag === tag) { ways[w].age = c.tick; return { hit: true, set: set, way: w, tag: tag }; }
+    }
+    var lru = 0;
+    for (var k = 1; k < ways.length; k++) if (ways[k].age < ways[lru].age) lru = k;
+    var evicted = ways[lru].tag;
+    ways[lru].tag = tag;
+    ways[lru].age = c.tick;
+    return { hit: false, set: set, way: lru, tag: tag, evicted: evicted };
+  }
+
+  function cfDecompose(addr, blockB, sets) {
+    var offB = cfLog2i(blockB), idxB = cfLog2i(sets);
+    var blockAddr = Math.floor(addr / blockB);
+    return {
+      offset: addr % blockB, set: blockAddr % sets, tag: Math.floor(blockAddr / sets),
+      offB: offB, idxB: idxB, tagB: 32 - offB - idxB
+    };
+  }
+
+  var CF_BASE = 0x80000000;
+  function cfTraceLoop() {
+    var a = [];
+    for (var i = 0; i < 600; i++) a.push(CF_BASE + (i % 16) * 4);
+    return a;
+  }
+  function cfTraceMatrix() {
+    var a = [];
+    for (var c = 0; c < 64; c++) for (var r = 0; r < 64; r++) a.push(CF_BASE + (r * 64 + c) * 4);
+    return a;
+  }
+  function cfTraceSweep() {
+    var a = [];
+    for (var i = 0; i < 1536 * 2; i++) a.push(CF_BASE + (i % 1536) * 4);
+    return a;
+  }
+  var CF_TRACES = {
+    loop:   { label: "HOT LOOP (lw storm)", desc: "600 loads from a 16-word kernel. Pure temporal locality: anything should catch it." },
+    matrix: { label: "COLUMN WALK (64x64 int matrix)", desc: "4096 loads, column-major over a 16KB matrix. Each row is 256 bytes away: block size decides." },
+    sweep:  { label: "DOUBLE SWEEP (6KB array, 2 passes)", desc: "3072 loads, sequential scan twice. Spatial locality pays, capacity hurts." }
+  };
+  function cfGetTrace(key) {
+    if (key === "matrix") return cfTraceMatrix();
+    if (key === "sweep") return cfTraceSweep();
+    return cfTraceLoop();
+  }
+  function cfFullSim(trace, cfg) {
+    var c = cfNewCache(cfg.sizeKB, cfg.assoc, cfg.blockB);
+    var hits = 0;
+    for (var i = 0; i < trace.length; i++) if (cfAccess(c, trace[i]).hit) hits++;
+    var rate = hits / trace.length;
+    return { hits: hits, misses: trace.length - hits, n: trace.length, rate: rate, amat: 1 + (1 - rate) * 120 };
+  }
+
+  var CF_TRIALS = [
+    {
+      id: 0, trace: "loop", name: "Trial 1: The Hot Loop",
+      goal: "Hit rate of at least 92% on the HOT LOOP trace.",
+      pass: function (r) { return r.rate >= 0.92; },
+      metric: function (r) { return "hit rate " + (r.rate * 100).toFixed(1) + "% (need 92.0%)"; },
+      hint: "Any cache you can bolt together passes this one. It is here to teach the controls: try STEP, then RUN, and watch the set grid."
+    },
+    {
+      id: 1, trace: "matrix", name: "Trial 2: The Column Walk",
+      goal: "Hit rate of at least 85% on the COLUMN WALK trace.",
+      pass: function (r) { return r.rate >= 0.85; },
+      metric: function (r) { return "hit rate " + (r.rate * 100).toFixed(1) + "% (need 85.0%)"; },
+      hint: "The walk strides 256 bytes between rows, so small blocks fetch neighbors nobody reads. Fit the 16KB working set and spend silicon on block size: 32-byte blocks are the floor, 64 is comfortable."
+    },
+    {
+      id: 2, trace: "sweep", name: "Trial 3: The Silicon Budget",
+      goal: "AMAT of 3.0 cycles or less on the DOUBLE SWEEP trace, with at most 8KB of cache.",
+      pass: function (r, cfg) { return cfg.sizeKB <= 8 && r.amat <= 3.0; },
+      metric: function (r, cfg) { return "AMAT " + r.amat.toFixed(2) + " cycles at " + cfg.sizeKB + "KB (need <= 3.00, <= 8KB)"; },
+      hint: "Size alone cannot save you here: the sweep's locality is spatial, not temporal. The lever is block size. Try the biggest line the die allows at exactly 8KB."
+    }
+  ];
+
+  /* ---------------- styles ---------------- */
+  var CF_CSS = [
+    ".cf-overlay{position:fixed;inset:0;background:rgba(4,7,7,.93);z-index:95;display:none;overflow-y:auto;padding:18px 12px;}",
+    ".cf-overlay.open{display:block;}",
+    ".cf-panel{max-width:1140px;margin:0 auto;background:var(--panel);border:1px solid var(--line);padding:22px;}",
+    ".cf-panel h3{font-family:'Chakra Petch',sans-serif;font-size:26px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.02em;color:var(--acid);}",
+    ".cf-sub{font-size:12px;line-height:1.65;color:#9fb3ae;margin:0 0 14px;max-width:82ch;}",
+    ".cf-sub a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan);}",
+    ".cf-sub b{color:var(--orange);}",
+    ".cf-close{float:right;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:12px;padding:10px 16px;cursor:pointer;min-height:44px;}",
+    ".cf-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}",
+    ".cf-tab{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;letter-spacing:.1em;padding:10px 18px;cursor:pointer;min-height:48px;}",
+    ".cf-tab.on{border-color:var(--acid);color:var(--acid);}",
+    ".cf-ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;}",
+    ".cf-field{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".cf-field h4{margin:0 0 6px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".cf-field select{width:100%;background:var(--black,#0a0f0e);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:12px;padding:10px 8px;min-height:44px;}",
+    ".cf-field input[type=range]{width:100%;accent-color:var(--acid);min-height:44px;}",
+    ".cf-field .val{font-family:monospace;font-size:13px;color:var(--acid);}",
+    ".cf-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;}",
+    ".cf-toolbar .secondary{min-height:48px;font-size:12px;padding:10px 18px;}",
+    ".cf-run{border-color:var(--acid) !important;color:var(--acid) !important;font-weight:700;}",
+    ".cf-run.running{border-color:#ff5d5d !important;color:#ff5d5d !important;}",
+    ".cf-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px;}",
+    ".cf-tile{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".cf-tile h4{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".cf-tile p{margin:0;font-family:monospace;font-size:18px;color:var(--ink);}",
+    ".cf-tile p.good{color:var(--acid);}",
+    ".cf-tile p.bad{color:var(--orange);}",
+    ".cf-break{border:1px solid var(--line);background:#0a0f0e;padding:10px 14px;margin-bottom:12px;font-family:monospace;font-size:12px;color:var(--ink);line-height:1.7;}",
+    ".cf-break .hit{color:var(--cyan);font-weight:700;}",
+    ".cf-break .miss{color:var(--orange);font-weight:700;}",
+    ".cf-break .lbl{color:#7c8d89;font-size:10px;letter-spacing:.1em;}",
+    ".cf-gridbox{border:1px solid var(--line);background:#0a0f0e;padding:12px;margin-bottom:12px;}",
+    ".cf-gridbox h4{margin:0 0 8px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".cf-grid{display:flex;flex-wrap:wrap;gap:2px;max-height:180px;overflow-y:auto;}",
+    ".cf-cell{width:9px;height:9px;background:#1b2624;border:1px solid #0a0f0e;}",
+    ".cf-cell.p1{background:#2e4a2a;}.cf-cell.p2{background:#5a7a2e;}.cf-cell.p3{background:#8aa832;}.cf-cell.full{background:var(--acid);}",
+    ".cf-cell.hit{outline:2px solid var(--cyan);outline-offset:-2px;}",
+    ".cf-cell.miss{outline:2px solid var(--orange);outline-offset:-2px;}",
+    ".cf-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:10px;color:#7c8d89;letter-spacing:.06em;}",
+    ".cf-legend i{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;}",
+    ".cf-ways{border:1px solid var(--line);background:#0a0f0e;padding:12px;margin-bottom:12px;}",
+    ".cf-ways h4{margin:0 0 8px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".cf-way{display:grid;grid-template-columns:64px 1fr auto;gap:10px;align-items:center;font-family:monospace;font-size:12px;padding:6px 8px;border:1px solid #1b2624;margin-bottom:4px;color:#9fb3ae;}",
+    ".cf-way .tag{color:var(--ink);}",
+    ".cf-way.hit{border-color:var(--cyan);background:rgba(88,228,232,.06);}",
+    ".cf-way.miss{border-color:var(--orange);background:rgba(255,107,44,.06);}",
+    ".cf-way .st{font-size:10px;letter-spacing:.1em;}",
+    ".cf-trial{border:1px solid var(--line);background:var(--panel-2);padding:14px 16px;margin-bottom:10px;}",
+    ".cf-trial h4{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-size:17px;text-transform:uppercase;color:var(--acid);}",
+    ".cf-trial .goal{font-size:12px;color:#9fb3ae;margin:0 0 10px;line-height:1.6;}",
+    ".cf-trial .row{display:flex;flex-wrap:wrap;gap:8px;align-items:end;}",
+    ".cf-trial select{background:var(--black,#0a0f0e);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:12px;padding:10px 8px;min-height:48px;min-width:110px;}",
+    ".cf-trial .secondary{min-height:48px;font-size:12px;padding:10px 18px;}",
+    ".cf-trial label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);display:block;margin-bottom:4px;}",
+    ".cf-result{margin-top:10px;font-family:monospace;font-size:12px;line-height:1.7;padding:10px 12px;border:1px solid var(--line);display:none;}",
+    ".cf-result.show{display:block;}",
+    ".cf-result.pass{border-color:var(--acid);color:var(--acid);}",
+    ".cf-result.fail{border-color:var(--orange);color:var(--orange);}",
+    ".cf-result .hint{color:#9fb3ae;display:block;margin-top:6px;}",
+    ".cf-scorebar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px;border:1px dashed var(--orange);padding:12px 14px;background:rgba(255,107,44,.05);}",
+    ".cf-scorebar .pts{font-family:monospace;font-size:20px;color:var(--orange);}",
+    ".cf-scorebar .txt{font-size:12px;color:var(--ink);line-height:1.6;}",
+    ".cf-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--panel);border:1px solid var(--acid);color:var(--acid);font-family:monospace;font-size:12px;padding:10px 18px;z-index:200;opacity:0;pointer-events:none;transition:opacity .2s;}",
+    ".cf-toast.show{opacity:1;}",
+    "@media (max-width:900px){.cf-panel{padding:14px;}.cf-way{grid-template-columns:52px 1fr auto;}}"
+  ].join("\n");
+
+  /* ---------------- UI state ---------------- */
+  var ui = null;
+  var CF_MISS_PENALTY = 120;
+
+  function cfBuild() {
+    if (ui) return ui;
+    var st = document.createElement("style");
+    st.textContent = CF_CSS;
+    document.head.appendChild(st);
+
+    var box = document.querySelector(".dossier .actions");
+    if (box && !cf$("cfBtn")) {
+      var b = cfEl("button", "secondary", "Run the Cache Forge");
+      b.id = "cfBtn";
+      b.addEventListener("click", function () { cf$("cfOverlay").classList.add("open"); });
+      box.appendChild(b);
+    }
+
+    var ov = cfEl("div", "cf-overlay");
+    ov.id = "cfOverlay";
+    var panel = cfEl("div", "cf-panel");
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    panel.innerHTML =
+      '<button class="cf-close" id="cfClose">CLOSE [x]</button>' +
+      "<h3>The Cache Forge</h3>" +
+      '<p class="cf-sub">A set-associative L1 data-cache bench for the kind of ' +
+      '<a href="https://dillingerstaffing.github.io/portfolio/" target="_blank" rel="noopener">RV32I pipeline work</a> ' +
+      "that pays the bills: real LRU replacement, real address decomposition, real AMAT math " +
+      "(hit 1 cycle, miss penalty " + CF_MISS_PENALTY + " cycles). " +
+      "Pick a workload, tune the silicon, and watch every load land: <b>cyan</b> is a hit, <b>orange</b> is a miss. " +
+      "Free-forge in EXPLORE, then qualify in TRIALS: three workloads, three pass marks, one Cache Architect certificate.</p>";
+
+    /* tabs */
+    var tabs = cfEl("div", "cf-tabs");
+    var tExp = cfEl("button", "cf-tab on", "EXPLORE");
+    var tTri = cfEl("button", "cf-tab", "TRIALS");
+    tabs.appendChild(tExp); tabs.appendChild(tTri);
+    panel.appendChild(tabs);
+
+    var pageExp = cfEl("div", null, "");
+    var pageTri = cfEl("div", null, "");
+    pageTri.style.display = "none";
+    panel.appendChild(pageExp);
+    panel.appendChild(pageTri);
+
+    tExp.addEventListener("click", function () {
+      tExp.classList.add("on"); tTri.classList.remove("on");
+      pageExp.style.display = ""; pageTri.style.display = "none";
+    });
+    tTri.addEventListener("click", function () {
+      tTri.classList.add("on"); tExp.classList.remove("on");
+      pageTri.style.display = ""; pageExp.style.display = "none";
+    });
+    cf$("cfClose").addEventListener("click", function () {
+      cfStopRun();
+      ov.classList.remove("open");
+    });
+
+    ui = { ov: ov, tExp: tExp, tTri: tTri, pageExp: pageExp, pageTri: pageTri };
+    cfBuildExplore();
+    cfBuildTrials();
+    return ui;
+  }
+
+  function cfSelect(opts, val) {
+    var s = document.createElement("select");
+    opts.forEach(function (o) {
+      var op = document.createElement("option");
+      op.value = o; op.textContent = o;
+      s.appendChild(op);
+    });
+    s.value = val;
+    return s;
+  }
+
+  /* ================= EXPLORE ================= */
+  var ex = null;
+
+  function cfBuildExplore() {
+    var p = ui.pageExp;
+
+    /* controls */
+    var ctl = cfEl("div", "cf-ctl");
+    function field(title) {
+      var f = cfEl("div", "cf-field", "<h4>" + cfEsc(title) + "</h4>");
+      ctl.appendChild(f);
+      return f;
+    }
+    var fs = field("Cache size"); ex = {};
+    ex.selSize = cfSelect(["4", "8", "16", "32"], "8"); fs.appendChild(ex.selSize);
+    var fa = field("Associativity");
+    ex.selAssoc = cfSelect(["1", "2", "4", "8"], "4"); fa.appendChild(ex.selAssoc);
+    var fb = field("Block size");
+    ex.selBlock = cfSelect(["16", "32", "64", "128"], "64"); fb.appendChild(ex.selBlock);
+    var ft = field("Workload");
+    ex.selTrace = document.createElement("select");
+    Object.keys(CF_TRACES).forEach(function (k) {
+      var op = document.createElement("option");
+      op.value = k; op.textContent = CF_TRACES[k].label;
+      ex.selTrace.appendChild(op);
+    });
+    ft.appendChild(ex.selTrace);
+    var fsp = field("Run speed");
+    ex.rngSpeed = document.createElement("input");
+    ex.rngSpeed.type = "range"; ex.rngSpeed.min = "1"; ex.rngSpeed.max = "300"; ex.rngSpeed.value = "40";
+    var vsp = cfEl("div", "val", "40 loads/tick");
+    ex.rngSpeed.addEventListener("input", function () { vsp.textContent = ex.rngSpeed.value + " loads/tick"; });
+    fsp.appendChild(ex.rngSpeed); fsp.appendChild(vsp);
+    p.appendChild(ctl);
+
+    ex.traceDesc = cfEl("p", "cf-sub", "");
+    p.appendChild(ex.traceDesc);
+
+    /* toolbar */
+    var tb = cfEl("div", "cf-toolbar");
+    ex.btnStep = cfEl("button", "secondary", "STEP 1");
+    ex.btnRun = cfEl("button", "secondary cf-run", "RUN");
+    ex.btnReset = cfEl("button", "secondary", "RESET");
+    tb.appendChild(ex.btnStep); tb.appendChild(ex.btnRun); tb.appendChild(ex.btnReset);
+    p.appendChild(tb);
+
+    /* tiles */
+    var tiles = cfEl("div", "cf-tiles");
+    var names = [["LOADS", "tLoads"], ["HITS", "tHits"], ["MISSES", "tMiss"], ["HIT RATE", "tRate"], ["AMAT", "tAmat"]];
+    ex.tiles = {};
+    names.forEach(function (n) {
+      var t = cfEl("div", "cf-tile", "<h4>" + n[0] + "</h4><p>0</p>");
+      ex.tiles[n[1]] = t.querySelector("p");
+      tiles.appendChild(t);
+    });
+    p.appendChild(tiles);
+
+    /* address breakdown */
+    ex.brk = cfEl("div", "cf-break", '<span class="lbl">LAST LOAD</span><br>press STEP or RUN');
+    p.appendChild(ex.brk);
+
+    /* set grid */
+    var gb = cfEl("div", "cf-gridbox", "<h4>Set occupancy (one cell per set, brighter = fuller)</h4>");
+    ex.grid = cfEl("div", "cf-grid");
+    gb.appendChild(ex.grid);
+    var leg = cfEl("div", "cf-legend",
+      '<span><i style="background:#1b2624"></i>empty</span>' +
+      '<span><i style="background:#8aa832"></i>filling</span>' +
+      '<span><i style="background:var(--acid)"></i>full</span>' +
+      '<span><i style="background:var(--cyan)"></i>last hit</span>' +
+      '<span><i style="background:var(--orange)"></i>last miss</span>');
+    gb.appendChild(leg);
+    p.appendChild(gb);
+
+    /* way detail */
+    var wb = cfEl("div", "cf-ways", "<h4>Last touched set: way detail</h4>");
+    ex.ways = cfEl("div", null, '<p class="cf-sub">No load yet.</p>');
+    wb.appendChild(ex.ways);
+    p.appendChild(wb);
+
+    ex.btnStep.addEventListener("click", function () { cfStep(1); });
+    ex.btnRun.addEventListener("click", function () {
+      if (ex.timer) { cfStopRun(); } else { cfStartRun(); }
+    });
+    ex.btnReset.addEventListener("click", cfResetExplore);
+    [ex.selSize, ex.selAssoc, ex.selBlock, ex.selTrace].forEach(function (s) {
+      s.addEventListener("change", cfResetExplore);
+    });
+
+    cfResetExplore();
+  }
+
+  function cfCfg() {
+    return {
+      sizeKB: parseInt(ex.selSize.value, 10),
+      assoc: parseInt(ex.selAssoc.value, 10),
+      blockB: parseInt(ex.selBlock.value, 10)
+    };
+  }
+
+  function cfResetExplore() {
+    cfStopRun();
+    var cfg = cfCfg();
+    ex.cache = cfNewCache(cfg.sizeKB, cfg.assoc, cfg.blockB);
+    ex.cfg = cfg;
+    ex.traceKey = ex.selTrace.value;
+    ex.trace = cfGetTrace(ex.traceKey);
+    ex.pos = 0; ex.hits = 0; ex.misses = 0; ex.last = null;
+    ex.occ = new Array(ex.cache.sets).fill(0);
+    ex.traceDesc.innerHTML = "<b>" + cfEsc(CF_TRACES[ex.traceKey].label) + "</b>: " +
+      cfEsc(CF_TRACES[ex.traceKey].desc) + " (" + ex.trace.length + " loads)";
+    cfRenderGrid();
+    cfRenderStats();
+    ex.brk.innerHTML = '<span class="lbl">LAST LOAD</span><br>press STEP or RUN';
+    ex.ways.innerHTML = '<p class="cf-sub">No load yet.</p>';
+    ex.btnRun.textContent = "RUN";
+    ex.btnRun.classList.remove("running");
+  }
+
+  function cfRenderStats() {
+    var n = ex.pos;
+    var rate = n ? ex.hits / n : 0;
+    var amat = n ? 1 + (1 - rate) * CF_MISS_PENALTY : 1;
+    ex.tiles.tLoads.textContent = String(n);
+    ex.tiles.tHits.textContent = String(ex.hits);
+    ex.tiles.tMiss.textContent = String(ex.misses);
+    ex.tiles.tRate.textContent = (rate * 100).toFixed(1) + "%";
+    ex.tiles.tAmat.textContent = amat.toFixed(2) + "c";
+    ex.tiles.tRate.className = rate >= 0.9 ? "good" : (rate >= 0.5 ? "" : "bad");
+    ex.tiles.tAmat.className = amat <= 4 ? "good" : (amat <= 30 ? "" : "bad");
+  }
+
+  function cfRenderGrid() {
+    ex.grid.innerHTML = "";
+    ex.cells = [];
+    for (var s = 0; s < ex.cache.sets; s++) {
+      var c = cfEl("div", "cf-cell");
+      ex.grid.appendChild(c);
+      ex.cells.push(c);
+    }
+    cfPaintOcc(-1);
+  }
+
+  function cfPaintOcc(lastSet, lastKind) {
+    for (var s = 0; s < ex.cells.length; s++) {
+      var occ = ex.occ[s], a = ex.cfg.assoc;
+      var cls = "cf-cell";
+      var frac = occ / a;
+      if (frac >= 1) cls += " full";
+      else if (frac >= 0.66) cls += " p3";
+      else if (frac >= 0.33) cls += " p2";
+      else if (frac > 0) cls += " p1";
+      if (s === lastSet) cls += (lastKind === "hit" ? " hit" : " miss");
+      ex.cells[s].className = cls;
+    }
+  }
+
+  function cfRenderBreak(addr, res) {
+    var d = cfDecompose(addr, ex.cfg.blockB, ex.cache.sets);
+    var tagHex = cfHex(d.tag, Math.max(1, Math.ceil(d.tagB / 4)));
+    var kind = res.hit ? '<span class="hit">HIT</span>' : '<span class="miss">MISS</span>';
+    ex.brk.innerHTML =
+      '<span class="lbl">LAST LOAD</span> ' + kind + "<br>" +
+      cfHex(addr, 8) + " = tag " + tagHex + " | set " + d.set + " | offset " + d.offset + "<br>" +
+      '<span class="lbl">ADDRESS SPLIT</span> tag ' + d.tagB + "b | index " + d.idxB + "b | offset " + d.offB + "b" +
+      (res.hit ? "" : ' &nbsp;<span class="lbl">EVICTED WAY ' + res.way + (res.evicted >= 0 ? " (tag " + cfHex(res.evicted, 4) + ")" : " (empty slot)") + "</span>");
+  }
+
+  function cfRenderWays(setIdx, res) {
+    var ways = ex.cache.lines[setIdx];
+    ex.ways.innerHTML = "";
+    var head = cfEl("p", "cf-sub", "Set " + setIdx + " of " + ex.cache.sets + ", " + ex.cfg.assoc + "-way");
+    ex.ways.appendChild(head);
+    ways.forEach(function (w, i) {
+      var row = cfEl("div", "cf-way" + (i === res.way ? (res.hit ? " hit" : " miss") : ""),
+        '<span>WAY ' + i + "</span>" +
+        '<span class="tag">' + (w.tag < 0 ? "(empty)" : "tag " + cfHex(w.tag, 6)) + "</span>" +
+        '<span class="st">' + (i === res.way ? (res.hit ? "HIT" : "MISS, REPLACED") : "LRU #" + i) + "</span>");
+      ex.ways.appendChild(row);
+    });
+  }
+
+  function cfStep(n) {
+    if (ex.pos >= ex.trace.length) { cfToast("Trace exhausted: RESET to forge again"); return; }
+    for (var k = 0; k < n && ex.pos < ex.trace.length; k++) {
+      var addr = ex.trace[ex.pos];
+      var res = cfAccess(ex.cache, addr);
+      if (res.hit) ex.hits++; else ex.misses++;
+      /* occupancy bookkeeping */
+      var filled = 0;
+      var ways = ex.cache.lines[res.set];
+      for (var w = 0; w < ways.length; w++) if (ways[w].tag >= 0) filled++;
+      ex.occ[res.set] = filled;
+      ex.last = { addr: addr, res: res };
+      ex.pos++;
+    }
+    var last = ex.last;
+    cfPaintOcc(last.res.set, last.res.hit ? "hit" : "miss");
+    cfRenderStats();
+    cfRenderBreak(last.addr, last.res);
+    cfRenderWays(last.res.set, last.res);
+    if (ex.pos >= ex.trace.length) {
+      cfStopRun();
+      var rate = ex.hits / ex.trace.length;
+      cfToast("Trace done: " + (rate * 100).toFixed(1) + "% hits, AMAT " + (1 + (1 - rate) * CF_MISS_PENALTY).toFixed(2) + " cycles");
+    }
+  }
+
+  function cfStartRun() {
+    ex.btnRun.textContent = "PAUSE";
+    ex.btnRun.classList.add("running");
+    ex.timer = setInterval(function () {
+      cfStep(parseInt(ex.rngSpeed.value, 10));
+    }, 70);
+  }
+  function cfStopRun() {
+    if (ex && ex.timer) { clearInterval(ex.timer); ex.timer = null; }
+    if (ex && ex.btnRun) { ex.btnRun.textContent = "RUN"; ex.btnRun.classList.remove("running"); }
+  }
+
+  /* ================= TRIALS ================= */
+  var tr = null;
+
+  function cfBuildTrials() {
+    var p = ui.pageTri;
+    tr = { score: 0, passed: [false, false, false], cards: [] };
+
+    var bar = cfEl("div", "cf-scorebar",
+      '<span class="pts" id="cfPts">0 / 300</span>' +
+      '<span class="txt">Qualification score. Pass all three trials and the <b>Cache Architect</b> certificate unlocks. ' +
+      "Each trial runs its full workload instantly against the config you set in its card.</span>");
+    p.appendChild(bar);
+    tr.ptsEl = bar.querySelector("#cfPts");
+
+    CF_TRIALS.forEach(function (t) {
+      var card = cfEl("div", "cf-trial");
+      card.innerHTML =
+        "<h4>" + cfEsc(t.name) + "</h4>" +
+        '<p class="goal">' + cfEsc(t.goal) + ' Workload: <b>' + cfEsc(CF_TRACES[t.trace].label) + "</b>.</p>";
+      var row = cfEl("div", "row");
+      function lab(title, sel) {
+        var wrap = cfEl("div", null, "");
+        wrap.innerHTML = "<label>" + cfEsc(title) + "</label>";
+        wrap.appendChild(sel);
+        row.appendChild(wrap);
+      }
+      var sSize = cfSelect(["4", "8", "16", "32"], "8");
+      var sAssoc = cfSelect(["1", "2", "4", "8"], "4");
+      var sBlock = cfSelect(["16", "32", "64", "128"], "64");
+      lab("Cache size (KB)", sSize);
+      lab("Associativity", sAssoc);
+      lab("Block size (B)", sBlock);
+      var btn = cfEl("button", "secondary", "RUN TRIAL");
+      row.appendChild(btn);
+      card.appendChild(row);
+      var res = cfEl("div", "cf-result");
+      card.appendChild(res);
+      btn.addEventListener("click", function () {
+        var cfg = {
+          sizeKB: parseInt(sSize.value, 10),
+          assoc: parseInt(sAssoc.value, 10),
+          blockB: parseInt(sBlock.value, 10)
+        };
+        var r = cfFullSim(cfGetTrace(t.trace), cfg);
+        var ok = t.pass(r, cfg);
+        res.className = "cf-result show " + (ok ? "pass" : "fail");
+        res.innerHTML = (ok ? "PASS: " : "FAIL: ") + cfEsc(t.metric(r, cfg)) +
+          '<span class="hint">' + cfEsc(t.hint) + "</span>";
+        if (ok && !tr.passed[t.id]) {
+          tr.passed[t.id] = true;
+          tr.score += 100;
+          tr.ptsEl.textContent = tr.score + " / 300";
+          cfToast("Trial " + (t.id + 1) + " passed: +100");
+          if (tr.score >= 300) cfUnlockCert();
+        }
+      });
+      p.appendChild(card);
+      tr.cards.push(card);
+    });
+
+    tr.certBtn = cfEl("button", "secondary", "Download Cache Architect certificate");
+    tr.certBtn.style.display = "none";
+    tr.certBtn.style.marginTop = "10px";
+    tr.certBtn.style.minHeight = "52px";
+    tr.certBtn.addEventListener("click", cfDownloadCert);
+    p.appendChild(tr.certBtn);
+  }
+
+  function cfUnlockCert() {
+    cfToast("SWEEP: all three trials passed");
+    tr.certBtn.style.display = "";
+    var bar = tr.ptsEl.parentElement;
+    var note = cfEl("span", "txt", " <b>Cache Architect</b> certificate unlocked. Download it below.");
+    bar.appendChild(note);
+  }
+
+  function cfDownloadCert() {
+    var cfgNote = tr.cards.map(function (c, i) { return "Trial " + (i + 1) + ": " + (tr.passed[i] ? "PASS" : "FAIL"); }).join("\n");
+    var lines = [
+      "===============================================",
+      "  THE CACHE FORGE - GARAGE INVENTIONS",
+      "  CACHE ARCHITECT CERTIFICATE",
+      "===============================================",
+      "",
+      "Awarded to the tuner who qualified all three",
+      "workloads on the L1 bench:",
+      "",
+      cfgNote,
+      "",
+      "Trials: HOT LOOP (600 loads), COLUMN WALK (4096 loads,",
+      "64x64 int matrix), DOUBLE SWEEP (3072 loads, 6KB array).",
+      "Miss penalty 120 cycles. Real set-associative LRU sim.",
+      "",
+      "Score: 300 / 300. Full sweep. Ship it.",
+      "",
+      "Issued " + new Date().toISOString().slice(0, 10) + " by Emi's Garage"
+    ];
+    var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+    a.download = "cache-forge-certificate.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      (window.URL || window.webkitURL).revokeObjectURL(a.href);
+      a.remove();
+    }, 500);
+    cfToast("Certificate downloaded");
+  }
+
+  /* ---------------- init ---------------- */
+  function cfInit() {
+    if (typeof document === "undefined") return;
+    if (!document.querySelector(".dossier .actions")) return;
+    cfBuild();
+  }
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", cfInit);
+    } else {
+      cfInit();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      CF: {
+        newCache: cfNewCache, access: cfAccess, decompose: cfDecompose,
+        traceLoop: cfTraceLoop, traceMatrix: cfTraceMatrix, traceSweep: cfTraceSweep,
+        fullSim: cfFullSim, trials: CF_TRIALS, log2i: cfLog2i
+      }
+    };
+  }
+
+})();
