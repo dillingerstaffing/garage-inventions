@@ -6853,3 +6853,801 @@ if (document.readyState === "loading") {
   }
 
 })();
+/* ============================================================
+   THE GANTRY YARD
+   An overhead crane game with real pendulum physics on the hook.
+   Three crates, three painted drop zones. The load remembers
+   every stop you make: swing it into a stack, drop it off the
+   paint, or slam it down and the lift is lost. Pure sim functions
+   are shared verbatim with the node test harness (see the
+   GY-SIM markers below).
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- local helpers (never touch outer scope) ---------- */
+  var gy$ = function (id) { return document.getElementById(id); };
+  function gyEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function gyToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = gy$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function gyEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function gyMMSS(t) {
+    t = Math.max(0, Math.ceil(t));
+    var m = Math.floor(t / 60), s = t % 60;
+    return (m < 10 ? "0" + m : "" + m) + ":" + (s < 10 ? "0" + s : "" + s);
+  }
+
+/* GY-SIM-BEGIN */
+var GY = {
+  G: 9.81,
+  YARD_W: 24,
+  RAIL_Y: 11,
+  X_MIN: 1.2, X_MAX: 22.8,
+  L_MIN: 2.2, L_MAX: 9.2,
+  TROLLEY_ACCEL: 4.2,
+  TROLLEY_FRIC: 1.1,
+  TROLLEY_MAX: 6.5,
+  HOIST_RATE: 2.6,
+  THETA_DAMP: 0.30,
+  CRATE_W: 1.4, CRATE_H: 1.4,
+  LIFT_TIME: 75,
+  ENDSTOP_KICK: 0.45
+};
+
+function gyRng(seed) {
+  var a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function gyNewLift(seed, idx) {
+  var r = gyRng(((seed * 2654435761) ^ (idx * 40503 + 1)) >>> 0);
+  var pickupX = 2.2 + r() * 1.8;
+  var targetX = 19.8 + r() * 1.8;
+  var targetW = 2.8;
+  var stacks = [];
+  var bandLo = 6.0, bandHi = 16.5, slot = (bandHi - bandLo) / 3;
+  for (var i = 0; i < 3; i++) {
+    var w = 1.4 + r() * 1.0;
+    var h = 1.6 + r() * 2.4;
+    var sx = bandLo + i * slot + r() * (slot - w);
+    stacks.push({ x: sx, w: w, h: h });
+  }
+  return { seed: seed, idx: idx, pickupX: pickupX, targetX: targetX, targetW: targetW, stacks: stacks };
+}
+
+function gyNewState(lift) {
+  return {
+    lift: lift,
+    x: lift.pickupX, vx: 0,
+    theta: 0, omega: 0, l: 5.0, dl: 0,
+    attached: true, over: false, won: false, reason: "",
+    t: GY.LIFT_TIME, tUsed: 0,
+    drop: null, stats: null
+  };
+}
+
+function gyHook(s) {
+  return { hx: s.x + s.l * Math.sin(s.theta), hy: GY.RAIL_Y - s.l * Math.cos(s.theta) };
+}
+
+function gyCrateRect(s) {
+  var h = gyHook(s);
+  return { l: h.hx - GY.CRATE_W / 2, r: h.hx + GY.CRATE_W / 2, b: h.hy - GY.CRATE_H, t: h.hy };
+}
+
+function gyOverlap(a, b) {
+  return a.l < b.r && a.r > b.l && a.b < b.t && a.t > b.b;
+}
+
+function gyTimeout(s) {
+  s.over = true; s.won = false;
+  s.reason = "The shift whistle blew with the crate still on the hook.";
+  return [{ type: "fail", reason: s.reason }];
+}
+
+function gyStepHook(s, inp, dt) {
+  var ev = [];
+  if (s.over || !s.attached) return ev;
+  s.t -= dt; s.tUsed += dt;
+  if (s.t <= 0) { s.t = 0; return gyTimeout(s); }
+  var dir = inp.dir || 0;
+  var ax = dir * GY.TROLLEY_ACCEL - GY.TROLLEY_FRIC * s.vx;
+  var nvx = s.vx + ax * dt;
+  if (nvx > GY.TROLLEY_MAX) nvx = GY.TROLLEY_MAX;
+  if (nvx < -GY.TROLLEY_MAX) nvx = -GY.TROLLEY_MAX;
+  var nx = s.x + nvx * dt;
+  if (nx <= GY.X_MIN) {
+    nx = GY.X_MIN;
+    if (nvx < -2.5) { s.omega += (-nvx / s.l) * GY.ENDSTOP_KICK; ev.push({ type: "bump", msg: "End stop hit. The hook kicks." }); }
+    nvx = Math.abs(nvx) * 0.2;
+  } else if (nx >= GY.X_MAX) {
+    nx = GY.X_MAX;
+    if (nvx > 2.5) { s.omega += (-nvx / s.l) * GY.ENDSTOP_KICK; ev.push({ type: "bump", msg: "End stop hit. The hook kicks." }); }
+    nvx = -Math.abs(nvx) * 0.2;
+  }
+  s.x = nx; s.vx = nvx;
+  s.dl = (inp.hoist || 0) * GY.HOIST_RATE;
+  s.l += s.dl * dt;
+  if (s.l < GY.L_MIN) { s.l = GY.L_MIN; s.dl = 0; }
+  if (s.l > GY.L_MAX) { s.l = GY.L_MAX; s.dl = 0; }
+  var thAcc = -(GY.G / s.l) * Math.sin(s.theta) - (ax / s.l) * Math.cos(s.theta) - GY.THETA_DAMP * s.omega;
+  s.omega += thAcc * dt;
+  s.theta += s.omega * dt;
+  var cr = gyCrateRect(s);
+  for (var i = 0; i < s.lift.stacks.length; i++) {
+    var st = s.lift.stacks[i];
+    if (gyOverlap(cr, { l: st.x, r: st.x + st.w, b: 0, t: st.h })) {
+      s.over = true; s.won = false;
+      s.reason = "The crate swung into stack " + (i + 1) + " and burst open.";
+      ev.push({ type: "fail", reason: s.reason });
+      return ev;
+    }
+  }
+  return ev;
+}
+
+function gyRelease(s) {
+  var ev = [];
+  if (s.over || !s.attached) return ev;
+  var h = gyHook(s);
+  var tipVx = s.vx + s.l * Math.cos(s.theta) * s.omega + Math.sin(s.theta) * s.dl;
+  var tipVy = s.l * Math.sin(s.theta) * s.omega - Math.cos(s.theta) * s.dl;
+  s.attached = false;
+  s.drop = {
+    bx: h.hx, by: h.hy - GY.CRATE_H,
+    lvx: tipVx, lvy: tipVy,
+    relVx: tipVx, relVy: tipVy,
+    relY: h.hy - GY.CRATE_H,
+    relSway: s.theta, relL: s.l
+  };
+  ev.push({ type: "released" });
+  return ev;
+}
+
+function gyStepDrop(s, dt) {
+  var ev = [];
+  if (s.over || s.attached) return ev;
+  var d = s.drop;
+  s.t -= dt; s.tUsed += dt;
+  if (s.t <= 0) { s.t = 0; return gyTimeout(s); }
+  d.lvy -= GY.G * dt;
+  d.bx += d.lvx * dt;
+  d.by += d.lvy * dt;
+  if (d.bx < -1 || d.bx > GY.YARD_W + 1) {
+    s.over = true; s.won = false;
+    s.reason = "The crate sailed over the fence and is gone.";
+    ev.push({ type: "fail", reason: s.reason });
+    return ev;
+  }
+  var cr = { l: d.bx - GY.CRATE_W / 2, r: d.bx + GY.CRATE_W / 2, b: d.by, t: d.by + GY.CRATE_H };
+  for (var i = 0; i < s.lift.stacks.length; i++) {
+    var st = s.lift.stacks[i];
+    if (gyOverlap(cr, { l: st.x, r: st.x + st.w, b: 0, t: st.h })) {
+      s.over = true; s.won = false;
+      s.reason = "The crate smashed onto stack " + (i + 1) + ".";
+      ev.push({ type: "fail", reason: s.reason });
+      return ev;
+    }
+  }
+  if (d.by <= 0) {
+    d.by = 0;
+    var res = gyEvalLanding(s);
+    s.over = true; s.won = res.ok; s.reason = res.msg; s.stats = res.stats;
+    ev.push({ type: res.ok ? "delivered" : "fail", reason: s.reason, stats: res.stats });
+  }
+  return ev;
+}
+
+function gyEvalLanding(s) {
+  var d = s.drop, L = s.lift;
+  var offC = Math.abs(d.bx - L.targetX);
+  var impactV = -d.lvy;
+  var stats = { offC: offC, relVx: d.relVx, impactV: impactV, relY: d.relY, relSway: d.relSway, tUsed: s.tUsed };
+  if (offC > L.targetW / 2 - 0.2) {
+    return { ok: false, stats: stats, msg: "Dropped " + offC.toFixed(1) + " m off the paint. The foreman is not impressed." };
+  }
+  if (Math.abs(d.lvx) > 1.6) {
+    return { ok: false, stats: stats, msg: "Inside the zone but drifting " + Math.abs(d.lvx).toFixed(1) + " m/s sideways. The crate tipped over." };
+  }
+  if (impactV > 4.0) {
+    return { ok: false, stats: stats, msg: "Slammed in at " + impactV.toFixed(1) + " m/s. The crate burst open." };
+  }
+  var sc = gyScoreLift(stats);
+  return { ok: true, stats: stats, msg: "Delivered. " + sc.score + " points (" + sc.title + ")." };
+}
+
+function gyScoreLift(st) {
+  var sc = 100 - st.offC * 10 - Math.abs(st.relVx) * 6 - st.impactV * 2 - st.relY * 2 - st.tUsed * 0.15;
+  sc = Math.max(10, Math.min(100, Math.round(sc)));
+  var title = sc >= 90 ? "Silk Hand"
+    : sc >= 75 ? "Journeyman Rigger"
+    : sc >= 55 ? "Shop Hand"
+    : sc >= 30 ? "Needs Supervision"
+    : "Hazard to Navigation";
+  return { score: sc, title: title };
+}
+/* GY-SIM-END */
+
+  /* ---------- game state (DOM side) ---------- */
+  var G = {
+    raf: 0, running: false, last: 0, acc: 0,
+    inp: { dir: 0, hoist: 0 },
+    keyL: false, keyR: false, keyU: false, keyD: false,
+    btnL: false, btnR: false, btnU: false, btnD: false,
+    s: null, liftIdx: 0, lifts: [], seed: 1, log: [], best: null
+  };
+
+  var CW = 920, CH = 430, SC = 37, OX = 16, OY = 416;
+  function px(x) { return OX + x * SC; }
+  function py(y) { return OY - y * SC; }
+
+  function gyBestGet() {
+    try {
+      var raw = window.localStorage.getItem("garage-gantry-best");
+      G.best = raw ? JSON.parse(raw) : null;
+    } catch (e) { G.best = null; }
+  }
+  function gyBestSet(avg, title) {
+    G.best = { avg: avg, title: title, date: new Date().toISOString().slice(0, 10) };
+    try { window.localStorage.setItem("garage-gantry-best", JSON.stringify(G.best)); } catch (e) {}
+  }
+
+  function gyLog(msg) {
+    G.log.push({ t: G.s ? G.s.tUsed : 0, msg: msg });
+    if (G.log.length > 40) G.log.shift();
+    var ul = gy$("gyLog");
+    if (!ul) return;
+    ul.innerHTML = "";
+    var start = Math.max(0, G.log.length - 6);
+    for (var i = start; i < G.log.length; i++) {
+      var e = G.log[i];
+      var li = gyEl("li", "", "<span class=\"gy-ts\">[" + gyMMSS(e.t) + "]</span> " + gyEsc(e.msg));
+      ul.appendChild(li);
+    }
+  }
+
+  /* ---------- rendering ---------- */
+  function gyDrawCrate(c, cx, cyBottom) {
+    var w = GY.CRATE_W * SC, h = GY.CRATE_H * SC;
+    var x0 = px(cx) - w / 2, y1 = py(cyBottom);
+    c.fillStyle = "rgba(255,107,44,.88)";
+    c.fillRect(x0, y1 - h, w, h);
+    c.strokeStyle = "#7a3a12";
+    c.lineWidth = 2;
+    c.strokeRect(x0, y1 - h, w, h);
+    c.strokeStyle = "rgba(122,58,18,.8)";
+    c.lineWidth = 3;
+    c.beginPath();
+    c.moveTo(x0 + 4, y1 - 4); c.lineTo(x0 + w - 4, y1 - h + 4);
+    c.moveTo(x0 + w - 4, y1 - 4); c.lineTo(x0 + 4, y1 - h + 4);
+    c.stroke();
+    c.fillStyle = "#2a1404";
+    c.font = "700 10px monospace";
+    c.textAlign = "center";
+    c.fillText("FRAGILE", px(cx), y1 - h / 2 + 3);
+  }
+
+  function gyRender() {
+    var cv = gy$("gyCanvas");
+    if (!cv || !G.s) return;
+    var c = cv.getContext("2d");
+    var s = G.s, L = s.lift;
+    c.clearRect(0, 0, CW, CH);
+    c.fillStyle = "#060b0c";
+    c.fillRect(0, 0, CW, CH);
+    /* ground */
+    c.fillStyle = "#0b1110";
+    c.fillRect(0, OY, CW, CH - OY);
+    c.strokeStyle = "rgba(126,231,135,.35)";
+    c.lineWidth = 2;
+    c.beginPath(); c.moveTo(0, OY); c.lineTo(CW, OY); c.stroke();
+    /* gantry columns + rail */
+    c.fillStyle = "#1b2b29";
+    c.fillRect(px(0.4) - 6, py(GY.RAIL_Y) - 4, 12, py(0) - py(GY.RAIL_Y) + 4);
+    c.fillRect(px(23.6) - 6, py(GY.RAIL_Y) - 4, 12, py(0) - py(GY.RAIL_Y) + 4);
+    c.strokeStyle = "#4a5d59";
+    c.lineWidth = 3;
+    c.beginPath(); c.moveTo(px(0), py(GY.RAIL_Y)); c.lineTo(px(24), py(GY.RAIL_Y)); c.stroke();
+    c.lineWidth = 1;
+    c.beginPath(); c.moveTo(px(0), py(GY.RAIL_Y) - 8); c.lineTo(px(24), py(GY.RAIL_Y) - 8); c.stroke();
+    /* end stops */
+    c.fillStyle = "#ff4668";
+    c.fillRect(px(GY.X_MIN) - 4, py(GY.RAIL_Y) - 16, 8, 16);
+    c.fillRect(px(GY.X_MAX) - 4, py(GY.RAIL_Y) - 16, 8, 16);
+    /* pickup pallet */
+    c.fillStyle = "#2c2117";
+    c.fillRect(px(L.pickupX) - 40, OY - 8, 80, 8);
+    c.fillStyle = "#7c8d89";
+    c.font = "600 10px monospace"; c.textAlign = "center";
+    c.fillText("PICKUP", px(L.pickupX), OY + 14);
+    /* drop zone */
+    var zx0 = px(L.targetX - L.targetW / 2), zx1 = px(L.targetX + L.targetW / 2);
+    c.save();
+    c.setLineDash([8, 6]);
+    c.strokeStyle = "#7ee787";
+    c.lineWidth = 2;
+    c.strokeRect(zx0, OY - 18, zx1 - zx0, 18);
+    c.restore();
+    c.fillStyle = "rgba(126,231,135,.12)";
+    c.fillRect(zx0, OY - 18, zx1 - zx0, 18);
+    c.fillStyle = "#7ee787";
+    c.font = "600 10px monospace";
+    c.fillText("DROP ZONE", px(L.targetX), OY + 14);
+    /* stacks */
+    for (var i = 0; i < L.stacks.length; i++) {
+      var st = L.stacks[i];
+      var sx0 = px(st.x), sw = st.w * SC, sh = st.h * SC;
+      c.fillStyle = "#2c2117";
+      c.fillRect(sx0, OY - sh, sw, sh);
+      c.strokeStyle = "#6b4a2a";
+      c.lineWidth = 2;
+      c.strokeRect(sx0, OY - sh, sw, sh);
+      c.strokeStyle = "rgba(107,74,42,.7)";
+      c.lineWidth = 1;
+      for (var yy = OY - 30; yy > OY - sh; yy -= 30) {
+        c.beginPath(); c.moveTo(sx0, yy); c.lineTo(sx0 + sw, yy); c.stroke();
+      }
+      c.fillStyle = "#9fb3ae";
+      c.font = "600 10px monospace";
+      c.fillText("S" + (i + 1), sx0 + sw / 2, OY - sh - 6);
+    }
+    /* trolley */
+    var tx = px(s.x), ty = py(GY.RAIL_Y);
+    c.fillStyle = "#16211f";
+    c.strokeStyle = "#7ee787";
+    c.lineWidth = 2;
+    c.fillRect(tx - 24, ty - 26, 48, 26);
+    c.strokeRect(tx - 24, ty - 26, 48, 26);
+    /* cable + hook + crate */
+    var hook, crateY;
+    if (s.attached) {
+      hook = gyHook(s);
+      c.strokeStyle = "#9fb3ae";
+      c.lineWidth = 2;
+      c.beginPath(); c.moveTo(tx, ty); c.lineTo(px(hook.hx), py(hook.hy)); c.stroke();
+      c.fillStyle = "#9fb3ae";
+      c.beginPath(); c.arc(px(hook.hx), py(hook.hy), 5, 0, Math.PI * 2); c.fill();
+      crateY = hook.hy - GY.CRATE_H;
+      gyDrawCrate(c, hook.hx, crateY);
+    } else {
+      var d = s.drop;
+      c.strokeStyle = "#9fb3ae";
+      c.lineWidth = 2;
+      c.beginPath(); c.moveTo(tx, ty); c.lineTo(tx, py(GY.RAIL_Y - s.l)); c.stroke();
+      c.fillStyle = "#9fb3ae";
+      c.beginPath(); c.arc(tx, py(GY.RAIL_Y - s.l), 5, 0, Math.PI * 2); c.fill();
+      if (d) gyDrawCrate(c, d.bx, d.by);
+    }
+    /* result stamp */
+    if (s.over) {
+      c.font = "700 26px 'Chakra Petch',sans-serif";
+      c.textAlign = "center";
+      c.fillStyle = s.won ? "#7ee787" : "#ff4668";
+      c.fillText(s.won ? "DELIVERED" : "LIFT LOST", CW / 2, 44);
+    }
+  }
+
+  function gyHud() {
+    var s = G.s;
+    if (!s) return;
+    gy$("gyTimer").textContent = gyMMSS(s.t);
+    gy$("gyLift").textContent = "LIFT " + (G.liftIdx + 1) + "/3";
+    var deg = s.attached ? s.theta * 180 / Math.PI : 0;
+    var sw = gy$("gySway");
+    sw.textContent = "SWAY " + Math.abs(deg).toFixed(1) + " deg";
+    sw.style.color = Math.abs(deg) < 3 ? "#7ee787" : Math.abs(deg) < 10 ? "#ff9f43" : "#ff4668";
+    var alt;
+    if (s.attached) { var h = gyHook(s); alt = h.hy - GY.CRATE_H; }
+    else if (s.drop) { alt = s.drop.by; }
+    else { alt = 0; }
+    gy$("gyAlt").textContent = "LOAD " + Math.max(0, alt).toFixed(1) + " m";
+    gy$("gyDeliv").textContent = "DELIVERED " + G.lifts.filter(function (x) { return x.won; }).length;
+    var db = gy$("gyDrop");
+    if (db) db.disabled = !s.attached || s.over;
+  }
+
+  /* ---------- loop ---------- */
+  function gyOnEvent(e) {
+    if (e.type === "bump") {
+      gyLog(e.msg);
+      gyToast("End stop. Watch the hook.");
+    } else if (e.type === "released") {
+      gyLog("Load released.");
+    } else if (e.type === "delivered" || e.type === "fail") {
+      gyLog(e.reason);
+      gyFinishLift(e.type === "delivered", e.reason, e.stats);
+    }
+  }
+
+  function gyPollInput() {
+    G.inp.dir = ((G.keyR || G.btnR) ? 1 : 0) - ((G.keyL || G.btnL) ? 1 : 0);
+    G.inp.hoist = ((G.keyD || G.btnD) ? 1 : 0) - ((G.keyU || G.btnU) ? 1 : 0);
+  }
+
+  function gyLoop(now) {
+    if (!G.running) return;
+    var dt = Math.min(0.05, (now - G.last) / 1000);
+    G.last = now;
+    gyPollInput();
+    G.acc += dt;
+    var step = 1 / 120, n = 0;
+    while (G.acc >= step && n < 14) {
+      var ev = G.s.attached ? gyStepHook(G.s, G.inp, step) : gyStepDrop(G.s, step);
+      G.acc -= step; n++;
+      for (var i = 0; i < ev.length; i++) gyOnEvent(ev[i]);
+      if (G.s.over) break;
+    }
+    gyRender();
+    gyHud();
+    G.raf = requestAnimationFrame(gyLoop);
+  }
+
+  function gyStop() {
+    G.running = false;
+    if (G.raf) cancelAnimationFrame(G.raf);
+    G.raf = 0;
+    G.keyL = G.keyR = G.keyU = G.keyD = false;
+    G.btnL = G.btnR = G.btnU = G.btnD = false;
+  }
+
+  function gyClose() {
+    gyStop();
+    gy$("gyOverlay").classList.remove("open");
+  }
+
+  function gyStartShift() {
+    G.seed = (Math.random() * 1000000000) | 0;
+    G.liftIdx = 0;
+    G.lifts = [];
+    G.log = [];
+    gyBeginLift();
+  }
+
+  function gyBeginLift() {
+    G.s = gyNewState(gyNewLift(G.seed, G.liftIdx));
+    G.acc = 0;
+    gy$("gyStart").style.display = "none";
+    gy$("gyMid").style.display = "none";
+    gy$("gyEnd").style.display = "none";
+    gy$("gyGame").style.display = "block";
+    gyLog("Lift " + (G.liftIdx + 1) + ": crate rigged at pickup. Run her over to the drop zone.");
+    if (!G.running) {
+      G.running = true;
+      G.last = performance.now();
+      G.raf = requestAnimationFrame(gyLoop);
+    }
+    gyRender();
+    gyHud();
+  }
+
+  function gyFinishLift(won, reason, stats) {
+    gyStop();
+    var sc = stats ? gyScoreLift(stats) : { score: 0, title: "Lost" };
+    G.lifts.push({ won: won, score: won ? sc.score : 0, title: won ? sc.title : "Lift lost", reason: reason });
+    var mid = gy$("gyMid");
+    mid.style.display = "block";
+    gy$("gyGame").style.display = "none";
+    gy$("gyMidTitle").textContent = won ? "Lift " + (G.liftIdx + 1) + " delivered" : "Lift " + (G.liftIdx + 1) + " lost";
+    gy$("gyMidTitle").style.color = won ? "#7ee787" : "#ff4668";
+    var body = gyEsc(reason);
+    if (won && stats) {
+      body += "<br>Miss: " + stats.offC.toFixed(1) + " m. Release sway: " +
+        (Math.abs(stats.relSway) * 180 / Math.PI).toFixed(1) + " deg. Impact: " +
+        stats.impactV.toFixed(1) + " m/s. Time: " + Math.round(stats.tUsed) + " s.";
+      body += "<br><strong>" + sc.score + " points (" + gyEsc(sc.title) + ").</strong>";
+    }
+    gy$("gyMidBody").innerHTML = body;
+    gy$("gyNext").textContent = G.liftIdx < 2 ? "Rig the next lift" : "See the shift report";
+  }
+
+  function gyNextLift() {
+    if (G.liftIdx < 2) {
+      G.liftIdx++;
+      gyBeginLift();
+    } else {
+      gyShowEnd();
+    }
+  }
+
+  function gyAvg() {
+    var sum = 0;
+    for (var i = 0; i < G.lifts.length; i++) sum += G.lifts[i].score;
+    return G.lifts.length ? Math.round(sum / G.lifts.length) : 0;
+  }
+
+  function gyShowEnd() {
+    gyStop();
+    gy$("gyMid").style.display = "none";
+    gy$("gyGame").style.display = "none";
+    var end = gy$("gyEnd");
+    end.style.display = "block";
+    var delivered = G.lifts.filter(function (x) { return x.won; }).length;
+    var won = delivered === 3;
+    var avg = gyAvg();
+    var overall = gyScoreLift({ offC: 0, relVx: 0, impactV: 0, relY: 0, tUsed: 0 });
+    var title = avg >= 90 ? "Silk Hand" : avg >= 75 ? "Journeyman Rigger" : avg >= 55 ? "Shop Hand" : avg >= 30 ? "Needs Supervision" : "Hazard to Navigation";
+    var cls = won ? "gy-result win" : "gy-result fail";
+    var bestLine = "";
+    if (won && (!G.best || avg > G.best.avg)) {
+      gyBestSet(avg, title);
+      bestLine = "<p class=\"gy-best\">New house record.</p>";
+    } else if (G.best) {
+      bestLine = "<p class=\"gy-best\">House best: " + G.best.avg + "% (" + gyEsc(G.best.title) + ").</p>";
+    }
+    var rows = "";
+    for (var i = 0; i < G.lifts.length; i++) {
+      var x = G.lifts[i];
+      rows += "<div class=\"gy-liftrow " + (x.won ? "win" : "fail") + "\"><span>LIFT " + (i + 1) + "</span><span>" +
+        (x.won ? x.score + " pts" : "LOST") + "</span><span>" + gyEsc(x.won ? x.title : x.reason) + "</span></div>";
+    }
+    gy$("gyEndBody").innerHTML =
+      "<div class=\"" + cls + "\">" + (won ? "Three for three. The yard is clear." : "Shift over: " + delivered + " of 3 lifts delivered.") + "</div>" +
+      "<div class=\"gy-score\">SHIFT RATING <strong>" + avg + "%</strong> <span class=\"dim\">(" + gyEsc(title) + ")</span></div>" +
+      rows + bestLine +
+      "<div class=\"gy-actions\">" +
+      "<button id=\"gyManifest\" class=\"gy-big\">Download manifest</button>" +
+      (won ? "<button id=\"gyCert\" class=\"gy-big\">Operator certificate</button>" : "") +
+      "<button id=\"gyAgain\" class=\"gy-big accent\">Work another shift</button>" +
+      "<button id=\"gyClose2\" class=\"gy-big\">Back to the garage</button>" +
+      "</div>";
+    gy$("gyManifest").addEventListener("click", gyManifest);
+    var cb = gy$("gyCert");
+    if (cb) cb.addEventListener("click", gyCert);
+    gy$("gyAgain").addEventListener("click", gyStartShift);
+    gy$("gyClose2").addEventListener("click", gyClose);
+  }
+
+  function gyManifest() {
+    var delivered = G.lifts.filter(function (x) { return x.won; }).length;
+    var lines = G.log.map(function (e) { return "[" + gyMMSS(e.t) + "] " + e.msg; });
+    var lifts = G.lifts.map(function (x, i) {
+      return "Lift " + (i + 1) + ": " + (x.won ? "DELIVERED, " + x.score + " pts (" + x.title + ")" : "LOST") + "\n  " + x.reason;
+    }).join("\n");
+    var txt =
+      "GANTRY YARD SHIFT MANIFEST\n" +
+      "Garage Inventions: The Gantry Yard\n" +
+      "================================\n" +
+      "Date   : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Seed   : " + G.seed + "\n" +
+      "Result : " + (delivered === 3 ? "SHIFT COMPLETE" : "SHIFT INCOMPLETE") + " (" + delivered + "/3 delivered)\n" +
+      "Rating : " + gyAvg() + "%\n\n" +
+      lifts + "\n\nShift log:\n" + lines.join("\n") + "\n\n" +
+      "Signed by the hook block. It remembers every stop.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "gantry-yard-manifest.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    gyToast("Shift manifest downloaded");
+  }
+
+  function gyCert() {
+    var txt =
+      "GANTRY YARD OPERATOR CERTIFICATE\n" +
+      "Garage Inventions\n" +
+      "================================\n" +
+      "This certifies that the bearer ran the gantry crane for a\n" +
+      "full three-lift shift and delivered every crate to the paint.\n\n" +
+      "Date   : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Rating : " + gyAvg() + "%\n\n" +
+      "No stacks were harmed. The hook block vouches for the sway.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "gantry-yard-operator-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    gyToast("Certificate downloaded");
+  }
+
+  function gyDoRelease() {
+    if (!G.s || G.s.over) return;
+    if (!G.s.attached) { gyToast("No load on the hook."); return; }
+    var ev = gyRelease(G.s);
+    for (var i = 0; i < ev.length; i++) gyOnEvent(ev[i]);
+  }
+
+  function gyRerig() {
+    if (!G.s || G.s.over) return;
+    gyStop();
+    G.s.over = true; G.s.won = false;
+    G.s.reason = "The rigger cut the lift short and re-slung the load.";
+    gyLog(G.s.reason);
+    gyFinishLift(false, G.s.reason, null);
+  }
+
+  /* ---------- build ---------- */
+  function gyBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || gy$("gyBtn")) return;
+    gyBestGet();
+
+    var css = [
+      ".gy-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.93);display:none;align-items:center;justify-content:center;padding:14px;}",
+      ".gy-overlay.open{display:flex;}",
+      ".gy-panel{width:min(980px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+      ".gy-panel h3{font-family:'Chakra Petch',sans-serif;margin:0 0 6px;font-size:24px;letter-spacing:.02em;text-transform:uppercase;color:var(--acid);}",
+      ".gy-sub{font-size:12px;line-height:1.7;color:#9fb3ae;margin:0 0 12px;}",
+      ".gy-rules{border:1px dashed var(--acid);padding:12px 14px;margin-bottom:12px;background:rgba(126,231,135,.05);}",
+      ".gy-rules p{margin:0 0 8px;font-size:12px;line-height:1.7;color:var(--ink);}",
+      ".gy-rules p:last-child{margin-bottom:0;}",
+      ".gy-rules strong{color:var(--acid);}",
+      ".gy-hud{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;}",
+      ".gy-hud .cell{border:1px solid var(--line);background:var(--panel-2);padding:8px 12px;font-family:monospace;font-size:14px;color:var(--ink);min-width:110px;text-align:center;}",
+      ".gy-hud .cell small{display:block;font-size:9px;letter-spacing:.12em;color:#7c8d89;text-transform:uppercase;margin-bottom:2px;}",
+      ".gy-canvasbox{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+      ".gy-canvasbox canvas{width:100%;height:auto;display:block;}",
+      ".gy-ticker{border:1px solid var(--line);background:var(--panel-2);padding:8px 12px;margin-bottom:10px;min-height:96px;}",
+      ".gy-ticker ul{list-style:none;margin:0;padding:0;font-family:monospace;font-size:11px;line-height:1.8;color:var(--ink);}",
+      ".gy-ticker .gy-ts{color:var(--cyan);}",
+      ".gy-controls{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".gy-controls button{min-height:64px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);touch-action:none;user-select:none;-webkit-user-select:none;}",
+      ".gy-controls button:active{background:#1a2a28;}",
+      ".gy-controls button.held{background:#122a18;border-color:var(--acid);color:var(--acid);}",
+      ".gy-controls button.drop{border-color:#ff4668;color:#ff8ba0;}",
+      ".gy-controls button.drop:disabled{opacity:.35;cursor:default;}",
+      ".gy-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+      ".gy-big{min-height:52px;padding:10px 8px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".gy-big.accent{border-color:var(--acid);color:var(--acid);}",
+      ".gy-foot .gy-big{flex:1;min-width:140px;}",
+      ".gy-result{padding:12px 14px;font-size:13px;font-family:monospace;border:1px solid var(--line);line-height:1.7;margin-bottom:10px;color:var(--ink);}",
+      ".gy-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".gy-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".gy-score{font-family:monospace;font-size:14px;color:var(--ink);margin-bottom:8px;}",
+      ".gy-score strong{color:var(--acid);font-size:20px;}",
+      ".gy-score .dim{color:#72827f;font-size:12px;}",
+      ".gy-best{font-family:monospace;font-size:12px;color:var(--cyan);margin:0 0 10px;}",
+      ".gy-bestline{font-family:monospace;font-size:11px;color:#7c8d89;margin:0 0 12px;}",
+      ".gy-liftrow{display:grid;grid-template-columns:70px 90px 1fr;gap:10px;font-family:monospace;font-size:12px;padding:8px 10px;border:1px solid var(--line);margin-bottom:6px;color:var(--ink);}",
+      ".gy-liftrow.win{border-color:var(--acid);}",
+      ".gy-liftrow.fail{border-color:#ff4668;}",
+      ".gy-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px;}",
+      ".gy-midtitle{font-family:'Chakra Petch',sans-serif;font-size:22px;text-transform:uppercase;margin:0 0 10px;}",
+      ".gy-midbody{font-size:13px;line-height:1.8;color:var(--ink);font-family:monospace;margin:0 0 14px;}",
+      ".gy-midbody strong{color:var(--acid);}",
+      "@media (max-width:640px){.gy-controls{grid-template-columns:repeat(3,minmax(0,1fr));}.gy-actions{grid-template-columns:1fr;}.gy-liftrow{grid-template-columns:1fr;gap:2px;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = gyEl("button", "secondary", "Run the Gantry Yard");
+    b.id = "gyBtn";
+    box.appendChild(b);
+
+    var ov = gyEl("div", "gy-overlay");
+    ov.id = "gyOverlay";
+    ov.innerHTML =
+      "<div class=\"gy-panel\" role=\"dialog\" aria-label=\"The Gantry Yard overhead crane game\">" +
+      "<h3>The Gantry Yard</h3>" +
+      "<p class=\"gy-sub\">Overhead crane, one hook, three crates. The yard is counting on you.</p>" +
+      "<div id=\"gyStart\">" +
+      "<div class=\"gy-rules\">" +
+      "<p><strong>The job:</strong> sling three crates from the pickup pallet to the painted drop zone. A full shift is three delivered loads, 75 seconds per lift.</p>" +
+      "<p><strong>The machine:</strong> hold <strong>trolley</strong> buttons to run the bridge, hold <strong>hoist</strong> buttons to reel the cable. The load is a real pendulum: it remembers every stop you make. Settle the sway, lower the crate low over the paint, then <strong>DROP</strong>. Arrow keys work too, Space drops.</p>" +
+      "<p><strong>Ways to lose a lift:</strong> swing the crate into a stack, drop it off the paint, land it drifting faster than <strong>1.6 m/s</strong> (it tips), slam it down faster than <strong>4.0 m/s</strong> (it bursts), or let the clock run out. Hit the end stops hard and the hook kicks.</p>" +
+      "</div>" +
+      "<p class=\"gy-bestline\" id=\"gyBestLine\"></p>" +
+      "<div class=\"gy-foot\"><button id=\"gyBegin\" class=\"gy-big accent\">Begin shift</button>" +
+      "<button id=\"gyClose0\" class=\"gy-big\">Not today</button></div>" +
+      "</div>" +
+      "<div id=\"gyGame\" style=\"display:none;\">" +
+      "<div class=\"gy-hud\">" +
+      "<div class=\"cell\"><small>Lift</small><span id=\"gyLift\">LIFT 1/3</span></div>" +
+      "<div class=\"cell\"><small>Clock</small><span id=\"gyTimer\">01:15</span></div>" +
+      "<div class=\"cell\"><small>Sway</small><span id=\"gySway\">SWAY 0.0 deg</span></div>" +
+      "<div class=\"cell\"><small>Load height</small><span id=\"gyAlt\">LOAD 0.0 m</span></div>" +
+      "<div class=\"cell\"><small>Scoreboard</small><span id=\"gyDeliv\">DELIVERED 0</span></div>" +
+      "</div>" +
+      "<div class=\"gy-canvasbox\"><canvas id=\"gyCanvas\" width=\"920\" height=\"430\"></canvas></div>" +
+      "<div class=\"gy-ticker\"><ul id=\"gyLog\"></ul></div>" +
+      "<div class=\"gy-controls\">" +
+      "<button id=\"gyTrolL\">Trolley &#9664;</button>" +
+      "<button id=\"gyTrolR\">Trolley &#9654;</button>" +
+      "<button id=\"gyHoistU\">Hoist &#9650;</button>" +
+      "<button id=\"gyHoistD\">Hoist &#9660;</button>" +
+      "<button id=\"gyDrop\" class=\"drop\">Drop load</button>" +
+      "</div>" +
+      "<div class=\"gy-foot\"><button id=\"gyRerig\" class=\"gy-big\">Re-rig lift</button><button id=\"gyClose1\" class=\"gy-big\">Close</button></div>" +
+      "</div>" +
+      "<div id=\"gyMid\" style=\"display:none;\">" +
+      "<h4 class=\"gy-midtitle\" id=\"gyMidTitle\"></h4>" +
+      "<p class=\"gy-midbody\" id=\"gyMidBody\"></p>" +
+      "<div class=\"gy-foot\"><button id=\"gyNext\" class=\"gy-big accent\">Rig the next lift</button></div>" +
+      "</div>" +
+      "<div id=\"gyEnd\" style=\"display:none;\"><div id=\"gyEndBody\"></div></div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    function hold(btn, set) {
+      var on = function (e) { e.preventDefault(); set(true); btn.classList.add("held"); };
+      var off = function () { set(false); btn.classList.remove("held"); };
+      btn.addEventListener("pointerdown", on);
+      btn.addEventListener("pointerup", off);
+      btn.addEventListener("pointerleave", off);
+      btn.addEventListener("pointercancel", off);
+      btn.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    }
+
+    hold(gy$("gyTrolL"), function (v) { G.btnL = v; });
+    hold(gy$("gyTrolR"), function (v) { G.btnR = v; });
+    hold(gy$("gyHoistU"), function (v) { G.btnU = v; });
+    hold(gy$("gyHoistD"), function (v) { G.btnD = v; });
+    gy$("gyDrop").addEventListener("click", gyDoRelease);
+    gy$("gyBegin").addEventListener("click", gyStartShift);
+    gy$("gyClose0").addEventListener("click", gyClose);
+    gy$("gyClose1").addEventListener("click", gyClose);
+    gy$("gyRerig").addEventListener("click", gyRerig);
+    gy$("gyNext").addEventListener("click", gyNextLift);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) gyClose();
+      if (!ov.classList.contains("open")) return;
+      if (e.code === "Space" && !e.repeat) { e.preventDefault(); gyDoRelease(); return; }
+      if (e.key === "ArrowLeft") { G.keyL = true; e.preventDefault(); }
+      if (e.key === "ArrowRight") { G.keyR = true; e.preventDefault(); }
+      if (e.key === "ArrowUp") { G.keyU = true; e.preventDefault(); }
+      if (e.key === "ArrowDown") { G.keyD = true; e.preventDefault(); }
+    });
+    document.addEventListener("keyup", function (e) {
+      if (e.key === "ArrowLeft") G.keyL = false;
+      if (e.key === "ArrowRight") G.keyR = false;
+      if (e.key === "ArrowUp") G.keyU = false;
+      if (e.key === "ArrowDown") G.keyD = false;
+    });
+    ov.addEventListener("click", function (e) { if (e.target === ov) gyClose(); });
+    b.addEventListener("click", function () {
+      ov.classList.add("open");
+      var bl = gy$("gyBestLine");
+      if (bl) bl.textContent = G.best ? ("House best: " + G.best.avg + "% (" + G.best.title + ").") : "No rigger has finished a shift yet. Be the first.";
+      if (G.s && !G.s.over && !G.running) {
+        G.running = true;
+        G.last = performance.now();
+        G.raf = requestAnimationFrame(gyLoop);
+      }
+    });
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", gyBuild);
+    } else {
+      gyBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      GY: GY,
+      gyRng: gyRng,
+      gyNewLift: gyNewLift,
+      gyNewState: gyNewState,
+      gyHook: gyHook,
+      gyStepHook: gyStepHook,
+      gyRelease: gyRelease,
+      gyStepDrop: gyStepDrop,
+      gyEvalLanding: gyEvalLanding,
+      gyScoreLift: gyScoreLift
+    };
+  }
+
+})();
