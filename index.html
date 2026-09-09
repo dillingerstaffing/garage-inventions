@@ -860,6 +860,22 @@
   "failure": "A heavy copper board can convince the oven it is still in the soak zone, at which point the smoke alarm files a formal complaint.",
   "transcript": "The Ground Plane Special needed three runs before it stopped laughing at my zone 3. On the fourth, the thermocouple read <strong>239.1C peak, 58 seconds above liquidus</strong>, and the joints came out like tiny mirrors. The oven beeped once, which I am choosing to interpret as respect."
 },
+{
+  "names": [
+    "The Shimmy Slayer",
+    "The 65-MPH Ghost",
+    "The Wobble Whisperer"
+  ],
+  "purposes": [
+    "Spins a wheel, reads the imbalance as vectors, and tells you exactly where to clip the weights.",
+    "Refuses to sign off on a wheel that still shimmies, no matter how late the customer is.",
+    "Prints a balance report suitable for the glovebox, the fridge, or small claims court."
+  ],
+  "built": "A junkyard tire machine, a strobe light with commitment issues, and a laptop doing vector math it only half remembers from school.",
+  "power": "A standard 110-volt outlet and whoever is holding the lug wrench.",
+  "failure": "A bent rim will lie to the sensors with a straight face, and the balancer will believe it every single time.",
+  "transcript": "The Commuter Special came in swearing it was the alignment. The balancer read <strong>2.4 oz at 140 degrees</strong> and the alignment went very quiet. Two spins later the wheel was true and the owner bought the rack a coffee, which the rack cannot drink."
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -10528,6 +10544,591 @@ function gyScoreLift(st) {
         ZONE_META: RF_ZONE_META,
         simulate: rfSimulate,
         grade: rfGrade
+      }
+    };
+  }
+
+})();
+
+/* ============================================================
+   THE BALANCING STAND
+   A wheel balancing machine bench. Three wheels roll in shaking;
+   spin each one, read the two-plane imbalance vectors, clip
+   weights onto the rim at the right angles, and get the residual
+   under tolerance. Real two-plane vector balancing (residual =
+   initial + sum of weight vectors), noisy machine readouts like a
+   real balancer, a spin animation, and a downloadable balance
+   report for every wheel that makes tolerance.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var bs$ = function (id) { return document.getElementById(id); };
+  function bsToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = bs$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function bsEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function bsEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ---------- pure balancing core (shared with node tests) ---------- */
+  function bsLcg(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+  /* angle convention: degrees clockwise from 12 o'clock, y grows downward */
+  function bsVec(mag, deg) {
+    var r = deg * Math.PI / 180;
+    return { x: mag * Math.sin(r), y: mag * Math.cos(r) };
+  }
+  function bsAddV(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
+  function bsMag(v) { return Math.sqrt(v.x * v.x + v.y * v.y); }
+  function bsAng(v) {
+    var a = Math.atan2(v.x, v.y) * 180 / Math.PI;
+    return ((a % 360) + 360) % 360;
+  }
+  function bsResidual(initMag, initDeg, weights) {
+    var v = bsVec(initMag, initDeg);
+    for (var i = 0; i < weights.length; i++) {
+      v = bsAddV(v, bsVec(weights[i].mag, weights[i].deg));
+    }
+    return v;
+  }
+  function bsNewWheel(def, seed) {
+    var rnd = bsLcg(seed);
+    function one(lo, hi) {
+      return { mag: lo + rnd() * (hi - lo), deg: Math.floor(rnd() * 36) * 10 };
+    }
+    return { inner: one(def.lo, def.hi), outer: one(def.lo, def.hi) };
+  }
+  /* a real balancer reading: truth plus a little machine noise */
+  function bsMeasure(res, rnd) {
+    var m = Math.max(0, bsMag(res) * (1 + (rnd() - 0.5) * 0.06));
+    var a = bsAng(res) + (rnd() - 0.5) * 8;
+    a = ((Math.round(a / 5) * 5) % 360 + 360) % 360;
+    return { mag: m, deg: a };
+  }
+  function bsPlaneTotal(weights) {
+    var t = 0;
+    for (var i = 0; i < weights.length; i++) t += weights[i].mag;
+    return t;
+  }
+
+  var BS_WHEELS = [
+    { name: "Commuter Special", tol: 0.25, lo: 1.5, hi: 3.0,
+      blurb: "A daily driver with a shimmy at 65 mph. Tolerance: 0.25 oz per plane. The owner swears it is the alignment. It is not the alignment." },
+    { name: "Half-Ton Hauler", tol: 0.50, lo: 2.5, hi: 5.0,
+      blurb: "A pickup wheel that rattles the mirrors at idle. Bigger imbalance, looser tolerance: 0.50 oz per plane." },
+    { name: "Track Day Special", tol: 0.15, lo: 1.0, hi: 2.2,
+      blurb: "A featherweight track wheel. Tolerance: 0.15 oz per plane. The driver counts grams. You will count ounces." }
+  ];
+  var BS_SIZES = [0.25, 0.5, 1.0, 2.0];
+
+  var BS_CSS = [
+    ".bs-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".bs-overlay.open{display:flex;}",
+    ".bs-panel{width:min(940px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--cyan);padding:16px;}",
+    ".bs-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".bs-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".bs-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}",
+    ".bs-tabs button{min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:#72827f;}",
+    ".bs-tabs button.on{border-color:var(--cyan);color:var(--cyan);}",
+    ".bs-tabs button.done{border-color:var(--acid);color:var(--acid);}",
+    ".bs-blurb{font-size:12px;color:#7c8d89;margin:0 0 12px;line-height:1.6;}",
+    ".bs-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}",
+    "@media (max-width:760px){.bs-grid{grid-template-columns:1fr;}}",
+    ".bs-card{border:1px solid var(--line);background:var(--panel-2);padding:12px;}",
+    ".bs-card h5{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".bs-card canvas{display:block;width:100%;max-width:360px;margin:0 auto;touch-action:manipulation;cursor:crosshair;}",
+    ".bs-hint{font-size:11px;color:#7c8d89;line-height:1.6;margin:8px 0 0;}",
+    ".bs-ctl-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}",
+    ".bs-ctl-row button{min-height:44px;padding:10px 12px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:#cfe3dd;}",
+    ".bs-ctl-row button.on{border-color:var(--acid);color:var(--acid);}",
+    ".bs-ctl-row button:disabled{opacity:.4;cursor:default;}",
+    ".bs-ctl-label{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;margin:0 0 6px;font-weight:600;}",
+    ".bs-read{border:1px solid var(--line);background:#0a1416;padding:12px;margin-bottom:12px;font-size:12px;line-height:1.8;}",
+    ".bs-read .ok{color:var(--acid);}",
+    ".bs-read .bad{color:var(--orange);}",
+    ".bs-read .dim{color:#72827f;}",
+    ".bs-banner{border:1px solid var(--acid);background:rgba(120,255,120,.06);padding:12px;margin-bottom:12px;}",
+    ".bs-banner h4{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;color:var(--acid);letter-spacing:.06em;}",
+    ".bs-banner p{margin:0;font-size:12px;color:#cfe3dd;line-height:1.6;}",
+    ".bs-chips{margin:0 0 10px;}",
+    ".bs-chip{display:inline-block;border:1px solid var(--line);background:#0a1416;padding:6px 8px;margin:0 6px 6px 0;font-size:11px;color:#cfe3dd;}",
+    ".bs-chip button{margin-left:8px;background:none;border:none;color:var(--orange);cursor:pointer;font:inherit;padding:4px;}",
+    ".bs-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".bs-foot button{min-height:48px;padding:12px 16px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;border:1px solid var(--line);background:#0a1416;color:#cfe3dd;}",
+    ".bs-foot button.primary{border-color:var(--acid);color:var(--acid);}",
+    ".bs-foot button:disabled{opacity:.4;cursor:default;}",
+    ".bs-spins{font-size:11px;color:#7c8d89;text-transform:uppercase;letter-spacing:.1em;}"
+  ].join("\n");
+
+  var bsWheelIdx = 0;
+  var bsInit = null;
+  var bsWeights = { inner: [], outer: [] };
+  var bsPlane = "inner";
+  var bsSize = 0.5;
+  var bsSpins = 0;
+  var bsBalanced = false;
+  var bsSpinning = false;
+  var bsSpinAngle = 0;
+  var bsRaf = null;
+  var bsDone = [false, false, false];
+  var bsEls = {};
+
+  function bsDef() { return BS_WHEELS[bsWheelIdx]; }
+
+  function bsReset(seed) {
+    bsInit = bsNewWheel(bsDef(), seed == null ? (Date.now() % 100000) : seed);
+    bsWeights = { inner: [], outer: [] };
+    bsSpins = 0;
+    bsBalanced = false;
+    bsSpinning = false;
+    bsSpinAngle = 0;
+    if (bsRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(bsRaf);
+    bsRaf = null;
+    bsEls.blurb.textContent = bsDef().blurb;
+    bsEls.read.innerHTML = '<span class="dim">Spin the wheel to read the imbalance. Then clip weights on the rim: tap the wheel face at the angle you want, on the selected plane.</span>';
+    bsEls.banner.style.display = "none";
+    bsEls.report.disabled = true;
+    bsEls.spin.disabled = false;
+    bsRenderChips();
+    bsUpdateSpins();
+    bsDraw();
+  }
+
+  function bsGrade() {
+    if (bsSpins <= 2) return "ONE-SPIN WONDER";
+    if (bsSpins <= 4) return "SHOP MATERIAL";
+    if (bsSpins <= 7) return "GETS IT DONE";
+    return "PERSISTENT";
+  }
+
+  function bsTrueResiduals() {
+    return {
+      inner: bsResidual(bsInit.inner.mag, bsInit.inner.deg, bsWeights.inner),
+      outer: bsResidual(bsInit.outer.mag, bsInit.outer.deg, bsWeights.outer)
+    };
+  }
+
+  function bsUpdateSpins() {
+    bsEls.spins.textContent = "Spins: " + bsSpins;
+  }
+
+  function bsDraw() {
+    var c = bs$("bsCanvas");
+    if (!c) return;
+    var g = c.getContext("2d");
+    var S = c.width, cx = S / 2, cy = S / 2;
+    g.clearRect(0, 0, S, S);
+    var R = S * 0.44;
+    var rIn = R * 0.60, rOut = R * 0.82;
+    function pt(r, deg) {
+      var a = (deg + bsSpinAngle) * Math.PI / 180;
+      return { x: cx + r * Math.sin(a), y: cy - r * Math.cos(a) };
+    }
+    /* tire */
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fillStyle = "#101312"; g.fill();
+    g.lineWidth = 3; g.strokeStyle = "#2a332f"; g.stroke();
+    /* tread ticks */
+    g.strokeStyle = "#232a28"; g.lineWidth = 4;
+    for (var ti = 0; ti < 36; ti++) {
+      var p1 = pt(R * 0.94, ti * 10), p2 = pt(R * 0.995, ti * 10);
+      g.beginPath(); g.moveTo(p1.x, p1.y); g.lineTo(p2.x, p2.y); g.stroke();
+    }
+    /* rim */
+    g.beginPath(); g.arc(cx, cy, R * 0.72, 0, Math.PI * 2); g.fillStyle = "#161d1b"; g.fill();
+    g.lineWidth = 2; g.strokeStyle = "#3a4a46"; g.stroke();
+    /* spokes */
+    g.strokeStyle = "#2c3835"; g.lineWidth = S * 0.02;
+    for (var si = 0; si < 5; si++) {
+      var sp = pt(R * 0.66, si * 72);
+      g.beginPath(); g.moveTo(cx, cy); g.lineTo(sp.x, sp.y); g.stroke();
+    }
+    g.beginPath(); g.arc(cx, cy, S * 0.055, 0, Math.PI * 2); g.fillStyle = "#0a0e0d"; g.fill();
+    g.lineWidth = 2; g.strokeStyle = "#3a4a46"; g.stroke();
+    /* plane rings */
+    [["inner", rIn, "#35e0d2"], ["outer", rOut, "#ff7a2e"]].forEach(function (pr) {
+      g.beginPath(); g.arc(cx, cy, pr[1], 0, Math.PI * 2);
+      g.lineWidth = bsPlane === pr[0] ? 3 : 1;
+      g.strokeStyle = bsPlane === pr[0] ? pr[2] : "#2a332f";
+      g.stroke();
+    });
+    /* 36 slot ticks on the outer ring */
+    g.strokeStyle = "#3a4a46"; g.lineWidth = 2;
+    for (var k = 0; k < 36; k++) {
+      var q1 = pt(rOut - 6, k * 10), q2 = pt(rOut + 6, k * 10);
+      g.beginPath(); g.moveTo(q1.x, q1.y); g.lineTo(q2.x, q2.y); g.stroke();
+    }
+    /* weights */
+    [["inner", rIn, "#35e0d2"], ["outer", rOut, "#ff7a2e"]].forEach(function (pr) {
+      var list = bsWeights[pr[0]];
+      for (var wi = 0; wi < list.length; wi++) {
+        var w = list[wi];
+        var p = pt(pr[1], w.deg);
+        var rot = (w.deg + bsSpinAngle) * Math.PI / 180;
+        g.save();
+        g.translate(p.x, p.y);
+        g.rotate(rot);
+        var bw = 6 + w.mag * 10;
+        g.fillStyle = pr[2];
+        g.fillRect(-bw / 2, -7, bw, 14);
+        g.strokeStyle = "#0a1416"; g.lineWidth = 2; g.strokeRect(-bw / 2, -7, bw, 14);
+        g.restore();
+      }
+    });
+    /* 12 o'clock marker */
+    g.fillStyle = "#72827f";
+    g.font = (S * 0.035) + "px monospace";
+    g.textAlign = "center";
+    g.fillText("0 deg", cx, cy - R - 8);
+  }
+
+  function bsRenderChips() {
+    [["inner", "INNER"], ["outer", "OUTER"]].forEach(function (pr) {
+      var box = bsEls["chips_" + pr[0]];
+      box.innerHTML = "";
+      var list = bsWeights[pr[0]];
+      if (!list.length) {
+        var none = bsEl("span", null, null);
+        none.style.cssText = "font-size:11px;color:#72827f;";
+        none.textContent = "no weights";
+        box.appendChild(none);
+        return;
+      }
+      list.forEach(function (w, i) {
+        var chip = bsEl("span", "bs-chip", null);
+        chip.textContent = w.mag.toFixed(2) + " oz at " + w.deg + " deg";
+        var x = bsEl("button", null, "x");
+        x.setAttribute("aria-label", "remove weight");
+        (function (idx) {
+          x.addEventListener("click", function () {
+            bsWeights[pr[0]].splice(idx, 1);
+            bsRenderChips();
+            bsDraw();
+            bsToast("Weight pulled off the " + pr[1] + " plane");
+          });
+        })(i);
+        chip.appendChild(x);
+        box.appendChild(chip);
+      });
+    });
+  }
+
+  function bsPlace(evt) {
+    if (bsSpinning || bsBalanced) return;
+    var c = bs$("bsCanvas");
+    var rect = c.getBoundingClientRect();
+    var sx = c.width / rect.width, sy = c.height / rect.height;
+    var x = (evt.clientX - rect.left) * sx, y = (evt.clientY - rect.top) * sy;
+    var S = c.width, cx = S / 2, cy = S / 2;
+    var dx = x - cx, dy = y - cy;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var R = S * 0.44;
+    if (dist < R * 0.45 || dist > R * 1.02) {
+      bsToast("Tap on the rim band to clip a weight there");
+      return;
+    }
+    var deg = Math.atan2(dx, -dy) * 180 / Math.PI;
+    deg = ((Math.round(deg / 10) * 10) % 360 + 360) % 360;
+    var list = bsWeights[bsPlane];
+    if (list.length >= 12) { bsToast("That plane is full of clips, pull some off"); return; }
+    if (bsPlaneTotal(list) + bsSize > 8) { bsToast("Over 8 oz on one plane, the rack refuses"); return; }
+    list.push({ mag: bsSize, deg: deg });
+    bsRenderChips();
+    bsDraw();
+    bsToast(bsSize.toFixed(2) + " oz clipped at " + deg + " deg (" + bsPlane.toUpperCase() + ")");
+  }
+
+  function bsSpin() {
+    if (bsSpinning || bsBalanced) return;
+    bsSpinning = true;
+    bsEls.spin.disabled = true;
+    var t0 = null, DUR = 1900;
+    function frame(ts) {
+      if (t0 == null) t0 = ts;
+      var t = Math.min(1, (ts - t0) / DUR);
+      var speed = 900 * Math.sin(Math.PI * Math.min(1, t * 1.15));
+      bsSpinAngle = (bsSpinAngle + speed * 0.016) % 360;
+      bsDraw();
+      if (t < 1) {
+        bsRaf = requestAnimationFrame(frame);
+      } else {
+        bsSpinning = false;
+        bsSpinAngle = 0;
+        bsRaf = null;
+        bsReadout();
+      }
+    }
+    bsRaf = requestAnimationFrame(frame);
+  }
+
+  function bsReadout() {
+    bsSpins++;
+    bsUpdateSpins();
+    var tol = bsDef().tol;
+    var tr = bsTrueResiduals();
+    var rnd = bsLcg((Date.now() % 100000) + bsSpins * 7919);
+    var mi = bsMeasure(tr.inner, rnd), mo = bsMeasure(tr.outer, rnd);
+    var ti = bsMag(tr.inner), to = bsMag(tr.outer);
+    var html = "";
+    function line(name, m, t) {
+      var ok = t <= tol;
+      var cls = ok ? "ok" : "bad";
+      /* correction angle: the weight goes opposite the heavy spot, like a real balancer */
+      var corr = (m.deg + 180) % 360;
+      if (m.mag <= tol * 0.5) {
+        return '<div><span class="' + cls + '">' + name + ": BALANCED</span> <span class=\"dim\">(reads " +
+          m.mag.toFixed(2) + " oz)</span></div>";
+      }
+      return '<div><span class="' + cls + '">' + name + ": ADD " + m.mag.toFixed(2) + " OZ AT " + corr +
+        " DEG</span> <span class=\"dim\">(tolerance " + tol.toFixed(2) + " oz)</span></div>";
+    }
+    html += line("INNER", mi, ti) + line("OUTER", mo, to);
+    if (ti <= tol && to <= tol) {
+      bsBalanced = true;
+      bsDone[bsWheelIdx] = true;
+      bsRefreshTabs();
+      var g = bsGrade();
+      bsEls.banner.style.display = "block";
+      bsEls.banner.innerHTML = "<h4>Balanced</h4><p>" + bsEsc(bsDef().name) +
+        " is true within " + tol.toFixed(2) + " oz on both planes after " + bsSpins +
+        (bsSpins === 1 ? " spin" : " spins") + ". Grade: " + g +
+        ". Take the balance report for the glovebox.</p>";
+      bsEls.report.disabled = false;
+      bsEls.spin.disabled = true;
+      bsToast("Balanced: " + g);
+    } else {
+      if (bsSpins >= 10) {
+        html += '<div class="dim">The rack would like you to know it has feelings too.</div>';
+      } else if (ti > 3 || to > 3) {
+        html += '<div class="dim">That wobble is visible from the parking lot. Keep clipping.</div>';
+      }
+    }
+    bsEls.read.innerHTML = html;
+    bsDraw();
+  }
+
+  function bsReport() {
+    if (!bsBalanced) return;
+    var tol = bsDef().tol;
+    var tr = bsTrueResiduals();
+    function wline(name, list) {
+      if (!list.length) return "  " + name + ": none";
+      return "  " + name + ": " + list.map(function (w) {
+        return w.mag.toFixed(2) + " oz at " + w.deg + " deg";
+      }).join(", ");
+    }
+    var txt = [
+      "GARAGE INVENTIONS - THE BALANCING STAND",
+      "Balance report",
+      "----------------------------------------",
+      "Wheel:     " + bsDef().name,
+      "Tolerance: " + tol.toFixed(2) + " oz per plane",
+      "Spins:     " + bsSpins,
+      "Grade:     " + bsGrade(),
+      "Date:      " + new Date().toISOString().slice(0, 10),
+      "",
+      "Final residual (true):",
+      "  INNER: " + bsMag(tr.inner).toFixed(2) + " oz at " + Math.round(bsAng(tr.inner)) + " deg",
+      "  OUTER: " + bsMag(tr.outer).toFixed(2) + " oz at " + Math.round(bsAng(tr.outer)) + " deg",
+      "",
+      "Weights clipped:",
+      wline("INNER", bsWeights.inner),
+      wline("OUTER", bsWeights.outer),
+      "",
+      "Signed: the rack. Witnessed: the shop cat."
+    ].join("\n");
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+    a.download = "balancing-stand-report.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      (window.URL || window.webkitURL).revokeObjectURL(a.href);
+      a.remove();
+    }, 500);
+    bsToast("Balance report downloaded");
+  }
+
+  function bsRefreshTabs() {
+    var tabs = bsEls.tabs.children;
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].className = (i === bsWheelIdx ? "on" : "") + (bsDone[i] ? " done" : "");
+    }
+  }
+
+  function bsSelectWheel(i) {
+    if (bsSpinning) return;
+    bsWheelIdx = i;
+    bsRefreshTabs();
+    bsReset();
+  }
+
+  function bsBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || bs$("bsBtn")) return;
+
+    var st = document.createElement("style");
+    st.textContent = BS_CSS;
+    document.head.appendChild(st);
+
+    var b = bsEl("button", "secondary", "Run the Balancing Stand");
+    b.id = "bsBtn";
+    b.addEventListener("click", function () {
+      bs$("bsOverlay").classList.add("open");
+      bsDraw();
+    });
+    box.appendChild(b);
+
+    var ov = bsEl("div", "bs-overlay");
+    ov.id = "bsOverlay";
+    var panel = bsEl("div", "bs-panel");
+    panel.innerHTML =
+      "<h3>The Balancing Stand</h3>" +
+      '<p class="bs-sub">Two-plane wheel balancing. Spin, read the vectors, clip weights on the rim, beat the tolerance. Real balancer math, no excuses.</p>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    var tabs = bsEl("div", "bs-tabs");
+    bsEls.tabs = tabs;
+    BS_WHEELS.forEach(function (w, i) {
+      var t = bsEl("button", i === 0 ? "on" : "", bsEsc(w.name));
+      t.addEventListener("click", function () { bsSelectWheel(i); });
+      tabs.appendChild(t);
+    });
+    panel.appendChild(tabs);
+
+    bsEls.blurb = bsEl("p", "bs-blurb", BS_WHEELS[0].blurb);
+    panel.appendChild(bsEls.blurb);
+
+    var grid = bsEl("div", "bs-grid");
+
+    var wcard = bsEl("div", "bs-card");
+    wcard.appendChild(bsEl("h5", null, "Wheel (tap the rim to clip a weight)"));
+    var c = document.createElement("canvas");
+    c.id = "bsCanvas";
+    c.width = 600; c.height = 600;
+    c.setAttribute("aria-label", "Wheel face. Tap the rim to clip a weight at that angle.");
+    c.addEventListener("click", bsPlace);
+    wcard.appendChild(c);
+    wcard.appendChild(bsEl("p", "bs-hint", "Angles are in degrees clockwise from 12 o\u2019clock, snapped to 10 degree slots like real clip positions. The readout tells you exactly where to clip each weight."));
+    grid.appendChild(wcard);
+
+    var ccard = bsEl("div", "bs-card");
+    ccard.appendChild(bsEl("h5", null, "Controls"));
+
+    ccard.appendChild(bsEl("p", "bs-ctl-label", "Plane"));
+    var prow = bsEl("div", "bs-ctl-row");
+    bsEls.planeBtns = {};
+    ["inner", "outer"].forEach(function (p) {
+      var pb = bsEl("button", p === "inner" ? "on" : "", p.toUpperCase());
+      pb.addEventListener("click", function () {
+        bsPlane = p;
+        bsEls.planeBtns.inner.className = p === "inner" ? "on" : "";
+        bsEls.planeBtns.outer.className = p === "outer" ? "on" : "";
+        bsDraw();
+      });
+      bsEls.planeBtns[p] = pb;
+      prow.appendChild(pb);
+    });
+    ccard.appendChild(prow);
+
+    ccard.appendChild(bsEl("p", "bs-ctl-label", "Clip weight size"));
+    var srow = bsEl("div", "bs-ctl-row");
+    bsEls.sizeBtns = [];
+    BS_SIZES.forEach(function (s) {
+      var sb = bsEl("button", s === bsSize ? "on" : "", s.toFixed(2) + " oz");
+      sb.addEventListener("click", function () {
+        bsSize = s;
+        bsEls.sizeBtns.forEach(function (x, xi) {
+          x.className = BS_SIZES[xi] === s ? "on" : "";
+        });
+      });
+      bsEls.sizeBtns.push(sb);
+      srow.appendChild(sb);
+    });
+    ccard.appendChild(srow);
+
+    ccard.appendChild(bsEl("p", "bs-ctl-label", "Weights on the rim"));
+    ccard.appendChild(bsEl("p", "bs-ctl-label", "Inner plane"));
+    var ci = bsEl("div", "bs-chips"); bsEls.chips_inner = ci; ccard.appendChild(ci);
+    ccard.appendChild(bsEl("p", "bs-ctl-label", "Outer plane"));
+    var co = bsEl("div", "bs-chips"); bsEls.chips_outer = co; ccard.appendChild(co);
+    grid.appendChild(ccard);
+    panel.appendChild(grid);
+
+    bsEls.banner = bsEl("div", "bs-banner", "");
+    bsEls.banner.style.display = "none";
+    panel.appendChild(bsEls.banner);
+
+    bsEls.read = bsEl("div", "bs-read",
+      '<span class="dim">Spin the wheel to read the imbalance. Then clip weights on the rim: tap the wheel face at the angle you want, on the selected plane.</span>');
+    panel.appendChild(bsEls.read);
+
+    var foot = bsEl("div", "bs-foot");
+    var spin = bsEl("button", "primary", "Spin the wheel");
+    bsEls.spin = spin;
+    spin.addEventListener("click", bsSpin);
+    var fresh = bsEl("button", null, "New imbalance");
+    fresh.addEventListener("click", function () { if (!bsSpinning) { bsReset(); bsToast("Fresh wobble, same wheel"); } });
+    var rep = bsEl("button", null, "Download balance report");
+    bsEls.report = rep;
+    rep.disabled = true;
+    rep.addEventListener("click", bsReport);
+    bsEls.spins = bsEl("span", "bs-spins", "Spins: 0");
+    bsEls.spins.style.alignSelf = "center";
+    var close = bsEl("button", null, "Close");
+    close.addEventListener("click", function () {
+      bs$("bsOverlay").classList.remove("open");
+      if (bsRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(bsRaf);
+      bsRaf = null;
+      bsSpinning = false;
+      bsSpinAngle = 0;
+      bsEls.spin.disabled = bsBalanced;
+    });
+    foot.appendChild(spin);
+    foot.appendChild(fresh);
+    foot.appendChild(rep);
+    foot.appendChild(bsEls.spins);
+    foot.appendChild(close);
+    panel.appendChild(foot);
+
+    bsReset(20260909);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bsBuild);
+  } else {
+    bsBuild();
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      BS: {
+        newWheel: bsNewWheel,
+        residual: bsResidual,
+        measure: bsMeasure,
+        mag: bsMag,
+        ang: bsAng,
+        vec: bsVec,
+        WHEELS: BS_WHEELS
       }
     };
   }

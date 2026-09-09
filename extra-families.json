@@ -318,5 +318,21 @@
   "power": "A dedicated 20-amp circuit and a fire extinguisher that is technically decorative.",
   "failure": "A heavy copper board can convince the oven it is still in the soak zone, at which point the smoke alarm files a formal complaint.",
   "transcript": "The Ground Plane Special needed three runs before it stopped laughing at my zone 3. On the fourth, the thermocouple read <strong>239.1C peak, 58 seconds above liquidus</strong>, and the joints came out like tiny mirrors. The oven beeped once, which I am choosing to interpret as respect."
+ },
+ {
+  "names": [
+   "The Shimmy Slayer",
+   "The 65-MPH Ghost",
+   "The Wobble Whisperer"
+  ],
+  "purposes": [
+   "Spins a wheel, reads the imbalance as vectors, and tells you exactly where to clip the weights.",
+   "Refuses to sign off on a wheel that still shimmies, no matter how late the customer is.",
+   "Prints a balance report suitable for the glovebox, the fridge, or small claims court."
+  ],
+  "built": "A junkyard tire machine, a strobe light with commitment issues, and a laptop doing vector math it only half remembers from school.",
+  "power": "A standard 110-volt outlet and whoever is holding the lug wrench.",
+  "failure": "A bent rim will lie to the sensors with a straight face, and the balancer will believe it every single time.",
+  "transcript": "The Commuter Special came in swearing it was the alignment. The balancer read <strong>2.4 oz at 140 degrees</strong> and the alignment went very quiet. Two spins later the wheel was true and the owner bought the rack a coffee, which the rack cannot drink."
  }
 ]
