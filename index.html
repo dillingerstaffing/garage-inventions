@@ -634,6 +634,54 @@
   "failure": "An over-stiffened track tune can launch a coffee mug clear across the shop, where it will be invoiced as a ballistic test.",
   "transcript": "Trial two passed at 20,000 N/m. <strong>The pothole has been formally forgiven.</strong> Trial three remains under review."
 },
+{
+  "names": [
+    "Stall Margin Accountant",
+    "Downwash Diplomat",
+    "Buffet Sommelier"
+  ],
+  "purposes": [
+    "Keeps a ledger of every degree between you and flow separation, and charges interest on recklessness.",
+    "Negotiates peace treaties between the upper and lower surfaces of the wing, then bills both sides.",
+    "Can taste the difference between pre-stall buffet and full separation the way others taste wine, and judges you accordingly."
+  ],
+  "built": "A smoke wand, a surplus aircraft balance, and a fan that the hardware store listed as 'industrial' without further qualification.",
+  "power": "Runs on a 20-amp circuit and the operator's willingness to stand clear of the intake, per the sign.",
+  "failure": "An over-cambered test article once generated so much lift it levitated off the balance and had to be invoiced as an unscheduled flight.",
+  "transcript": "Trial one logged 15.5 kN at 38 m/s. <strong>The wing was one degree from disagreement with the air.</strong> The accountant has filed the paperwork."
+},
+{
+  "names": [
+    "Drag Count Curator",
+    "Polar Plot Cartographer",
+    "Reynolds Number Referee"
+  ],
+  "purposes": [
+    "Collects drag counts the way other people collect stamps, and is just as fun at parties.",
+    "Maps the polar curve in exquisite detail, then frames the stall region as a cautionary tale.",
+    "Blows the whistle on any test run that claims results from a Reynolds number it did not actually earn."
+  ],
+  "built": "A manometer with trust issues, a pitot tube that has seen things, and graph paper worn smooth by erasing.",
+  "power": "Runs on static pressure differentials and the quiet satisfaction of a closed drag bucket.",
+  "failure": "A miscalibrated manometer once reported negative drag, and the wing was briefly suspected of violating thermodynamics in the garage.",
+  "transcript": "Endurance glide logged L/D 22.5 at 60 m/s. <strong>The curator has added four drag counts to the museum of inefficiency.</strong> Admission is free."
+},
+{
+  "names": [
+    "Tuft Wrangler",
+    "Smoke Wand Whisperer",
+    "Angle of Attack Auditor"
+  ],
+  "purposes": [
+    "Herds yarn tufts across the wing surface and reports which ones are lying about attached flow.",
+    "Coaxes laminar smoke lines over the test section with a steady hand and suspiciously specific humming.",
+    "Audits your angle of attack against your actual angle of attack, and finds discrepancies."
+  ],
+  "built": "Three hundred yarn tufts, a smoke machine borrowed from a Halloween store, and a protractor with no sense of humor.",
+  "power": "Runs on theatrical fog and the conviction that every tuft tells a story, most of them alarming.",
+  "failure": "The smoke machine once set off the shop fire alarm during a low-speed run, and the resulting evacuation was logged as a successful abort test.",
+  "transcript": "Carrier approach held 3.0 degrees of margin at 30 m/s. <strong>The tufts remained attached, which is more than can be said for the operator's composure.</strong>"
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -4411,6 +4459,452 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", coBuild);
 } else {
   coBuild();
+}
+
+
+/* ============================================================
+   11. THE WIND TUNNEL: low-speed aerodynamics bench (playable)
+   Real thin-airfoil theory: Cl = 2*pi*(alpha - alpha0),
+   Cd = Cd0 + Cl^2 / (pi * AR * e), with a post-stall lift
+   bleed past the critical angle. Tune camber, thickness and
+   angle of attack, then blow three fixed-speed trials.
+   ============================================================ */
+var WT_S = 10;       /* wing area, m^2 */
+var WT_RHO = 1.225;  /* air density, kg/m^3 */
+var WT_AR = 6;       /* aspect ratio */
+var WT_E = 0.9;      /* Oswald efficiency */
+
+function wtAlpha0(camber) { return -camber; }              /* deg: 2% camber gives -2 deg zero-lift angle */
+function wtAlphaCrit(camber) { return 14 - 0.5 * camber; } /* deg: cambered wings stall earlier */
+
+function wtPolar(camber, thick, alphaDeg) {
+  var a0 = wtAlpha0(camber), ac = wtAlphaCrit(camber);
+  var slope = 2 * Math.PI * Math.PI / 180; /* thin-airfoil lift slope, per degree */
+  var cl, stalled = alphaDeg > ac;
+  if (!stalled) {
+    cl = slope * (alphaDeg - a0);
+  } else {
+    var clCrit = slope * (ac - a0);
+    var over = Math.min(alphaDeg - ac, 14);
+    cl = clCrit * (1 - 0.42 * over / 14); /* separated flow bleeds lift off */
+  }
+  var cd0 = 0.006 + 0.0004 * thick;
+  var k = 1 / (Math.PI * WT_AR * WT_E);
+  var cd = cd0 + k * cl * cl;
+  return { cl: cl, cd: cd, a0: a0, ac: ac, stalled: stalled };
+}
+
+function wtForces(camber, thick, alphaDeg, v) {
+  var p = wtPolar(camber, thick, alphaDeg);
+  var qS = 0.5 * WT_RHO * v * v * WT_S;
+  return {
+    cl: p.cl, cd: p.cd,
+    l: qS * p.cl, d: qS * p.cd,
+    ld: p.cd > 0 ? p.cl / p.cd : 0,
+    a0: p.a0, ac: p.ac, stalled: p.stalled,
+    margin: p.ac - alphaDeg
+  };
+}
+
+var WT_TRIALS = [
+  {
+    name: "Trial 1: Heavy Lift",
+    desc: "Fixed 38 m/s headwind. Generate at least 14.0 kN of lift. Camber is cheap lift, but the wing stalls at a lower angle when cambered.",
+    v: 38,
+    judge: function (f) { return f.l >= 14000; }
+  },
+  {
+    name: "Trial 2: Endurance Glide",
+    desc: "Fixed 60 m/s. Hold lift-to-drag of 20 or better while carrying at least 8.0 kN. Thin wings and small angles glide best.",
+    v: 60,
+    judge: function (f) { return f.ld >= 20 && f.l >= 8000; }
+  },
+  {
+    name: "Trial 3: Carrier Approach",
+    desc: "Fixed 30 m/s. Carry at least 8.0 kN with 3 degrees or more of stall margin. High camber, high angle, short of the buffet.",
+    v: 30,
+    judge: function (f) { return f.l >= 8000 && f.margin >= 3; }
+  }
+];
+
+var wts = null;
+
+function wtBuild() {
+  var box = document.querySelector(".dossier .actions");
+  if (!box || $("wtBtn")) return;
+
+  var css = [
+    ".wt-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".wt-overlay.open{display:flex;}",
+    ".wt-panel{width:min(860px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+    ".wt-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".wt-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".wt-sliders{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}",
+    ".wt-ctl{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".wt-ctl h6{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".wt-ctl .val{font-family:monospace;font-size:13px;color:var(--ink);margin-bottom:6px;}",
+    ".wt-ctl input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+    ".wt-trials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".wt-trial{border:1px solid var(--line);padding:10px;background:var(--panel-2);display:flex;flex-direction:column;gap:8px;min-width:0;}",
+    ".wt-trial h5{margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+    ".wt-trial p{margin:0;font-size:11px;color:var(--ink);line-height:1.6;flex:1;}",
+    ".wt-trial .badge{font-family:monospace;font-size:11px;padding:4px 8px;border:1px solid var(--line);color:#72827f;text-align:center;}",
+    ".wt-trial .badge.pass{border-color:var(--acid);color:var(--acid);}",
+    ".wt-trial .badge.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".wt-trial button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--orange);color:var(--orange);}",
+    ".wt-trial button:disabled{opacity:.35;cursor:default;}",
+    ".wt-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+    ".wt-stage canvas{display:block;width:100%;height:240px;}",
+    ".wt-tel{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".wt-tel .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+    ".wt-tel .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".wt-tel .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+    ".wt-tel .t p.warn{color:var(--orange);}",
+    ".wt-tel .t p.bad{color:#ff8ba0;}",
+    ".wt-result{margin-top:0;padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;}",
+    ".wt-result.win{border-color:var(--acid);color:var(--acid);}",
+    ".wt-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".wt-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".wt-foot .secondary{flex:1;min-height:44px;}",
+    "@media (max-width:640px){.wt-sliders{grid-template-columns:1fr;}.wt-trials{grid-template-columns:1fr;}.wt-tel{grid-template-columns:1fr;}}"
+  ].join("\n");
+  var st = document.createElement("style");
+  st.textContent = css;
+  document.head.appendChild(st);
+
+  var b = el("button", "secondary", "Open the Wind Tunnel");
+  b.id = "wtBtn";
+  b.addEventListener("click", function () {
+    $("wtOverlay").classList.add("open");
+    wtSizeCanvas();
+    wtRefresh();
+  });
+  box.appendChild(b);
+
+  var trialsHtml = WT_TRIALS.map(function (tr, i) {
+    return '<div class="wt-trial"><h5>' + tr.name + '</h5><p>' + tr.desc + '</p>' +
+      '<div class="badge" id="wtBadge' + i + '">not run</div>' +
+      '<button id="wtRun' + i + '">Run trial</button></div>';
+  }).join("");
+
+  var ov = el("div", "wt-overlay");
+  ov.id = "wtOverlay";
+  ov.innerHTML =
+    '<div class="wt-panel" role="dialog" aria-label="The Wind Tunnel aerodynamics bench">' +
+    "<h3>The Wind Tunnel</h3>" +
+    '<p class="wt-sub">A 10 m^2 test wing on the balance. Real thin-airfoil polars, a live smoke tunnel, and three fixed-speed trials. Pass all three and the tunnel signs your log.</p>' +
+    '<div class="wt-sliders">' +
+    '<div class="wt-ctl"><h6>Angle of attack</h6><div class="val" id="wtAlphaVal"></div>' +
+    '<input type="range" id="wtAlpha" min="-4" max="24" step="0.5" value="6" aria-label="Angle of attack"></div>' +
+    '<div class="wt-ctl"><h6>Camber</h6><div class="val" id="wtCamberVal"></div>' +
+    '<input type="range" id="wtCamber" min="0" max="6" step="0.5" value="2" aria-label="Camber"></div>' +
+    '<div class="wt-ctl"><h6>Thickness</h6><div class="val" id="wtThickVal"></div>' +
+    '<input type="range" id="wtThick" min="6" max="18" step="0.5" value="12" aria-label="Thickness"></div>' +
+    '<div class="wt-ctl"><h6>Airspeed (live tunnel)</h6><div class="val" id="wtVVal"></div>' +
+    '<input type="range" id="wtV" min="20" max="90" step="1" value="50" aria-label="Airspeed"></div>' +
+    "</div>" +
+    '<div class="wt-trials">' + trialsHtml + "</div>" +
+    '<div class="wt-stage"><canvas id="wtCanvas"></canvas></div>' +
+    '<div class="wt-tel">' +
+    '<div class="t"><h6>Lift coefficient</h6><p id="wtCl">--</p></div>' +
+    '<div class="t"><h6>Drag coefficient</h6><p id="wtCd">--</p></div>' +
+    '<div class="t"><h6>Lift</h6><p id="wtLift">--</p></div>' +
+    '<div class="t"><h6>Drag</h6><p id="wtDrag">--</p></div>' +
+    '<div class="t"><h6>Lift / drag</h6><p id="wtLD">--</p></div>' +
+    '<div class="t"><h6>Stall margin</h6><p id="wtMargin">--</p></div>' +
+    "</div>" +
+    '<div class="wt-result" id="wtResult">Set your wing, then run a trial.</div>' +
+    '<div class="wt-foot">' +
+    '<button class="secondary" id="wtCertBtn" disabled>Download tunnel log</button>' +
+    '<button class="secondary" id="wtClose">Close</button>' +
+    "</div>" +
+    "</div>";
+  document.body.appendChild(ov);
+
+  wts = {
+    alpha: 6, camber: 2, thick: 12, v: 50,
+    passed: [false, false, false], setups: [null, null, null],
+    running: false, anim: null, parts: [], trialV: null
+  };
+
+  ["wtAlpha", "wtCamber", "wtThick", "wtV"].forEach(function (id) {
+    $(id).addEventListener("input", function () {
+      if (wts.running) return;
+      wts.alpha = +$("wtAlpha").value;
+      wts.camber = +$("wtCamber").value;
+      wts.thick = +$("wtThick").value;
+      wts.v = +$("wtV").value;
+      wtRefresh();
+    });
+  });
+
+  for (var i = 0; i < 3; i++) {
+    (function (ti) {
+      $("wtRun" + ti).addEventListener("click", function () { wtRunTrial(ti); });
+    })(i);
+  }
+
+  $("wtClose").addEventListener("click", function () {
+    if (wts.anim) { cancelAnimationFrame(wts.anim); wts.anim = null; }
+    wts.running = false;
+    $("wtOverlay").classList.remove("open");
+  });
+  $("wtCertBtn").addEventListener("click", wtCertificate);
+  wtInitParts();
+}
+
+function wtSizeCanvas() {
+  var c = $("wtCanvas");
+  if (!c) return;
+  var w = c.clientWidth || 700;
+  c.width = w;
+  c.height = 240;
+}
+
+function wtInitParts() {
+  wts.parts = [];
+  for (var i = 0; i < 120; i++) {
+    wts.parts.push({ x: Math.random() * 900, y: Math.random() * 240, s: 0.7 + Math.random() * 0.6 });
+  }
+}
+
+function wtRefresh() {
+  $("wtAlphaVal").textContent = wts.alpha.toFixed(1) + " deg";
+  $("wtCamberVal").textContent = wts.camber.toFixed(1) + " % chord";
+  $("wtThickVal").textContent = wts.thick.toFixed(1) + " % chord";
+  $("wtVVal").textContent = wts.v + " m/s";
+  var f = wtForces(wts.camber, wts.thick, wts.alpha, wts.v);
+  wtTelUpdate(f);
+  wtDrawPerf(performance.now() / 1000, wts.v, f);
+}
+
+function wtTelUpdate(f) {
+  $("wtCl").textContent = f.cl.toFixed(3);
+  $("wtCd").textContent = f.cd.toFixed(4);
+  $("wtLift").textContent = (f.l / 1000).toFixed(1) + " kN";
+  $("wtDrag").textContent = Math.round(f.d) + " N";
+  $("wtLD").textContent = f.ld.toFixed(1);
+  var m = $("wtMargin");
+  if (f.stalled) {
+    m.textContent = "STALLED (" + f.margin.toFixed(1) + " deg)";
+    m.className = "bad";
+  } else if (f.margin < 3) {
+    m.textContent = f.margin.toFixed(1) + " deg (thin)";
+    m.className = "warn";
+  } else {
+    m.textContent = f.margin.toFixed(1) + " deg";
+    m.className = "";
+  }
+}
+
+function wtAirfoilPts(camber, thick) {
+  var m = camber / 100, t = thick / 100, p = 0.4, n = 42, up = [], lo = [];
+  for (var i = 0; i <= n; i++) {
+    var x = i / n, yc, dyc;
+    var yt = 5 * t * (0.2969 * Math.sqrt(x) - 0.1260 * x - 0.3516 * x * x + 0.2843 * x * x * x - 0.1015 * x * x * x * x);
+    if (x < p) {
+      yc = m / (p * p) * (2 * p * x - x * x);
+      dyc = 2 * m / (p * p) * (p - x);
+    } else {
+      yc = m / ((1 - p) * (1 - p)) * ((1 - 2 * p) + 2 * p * x - x * x);
+      dyc = 2 * m / ((1 - p) * (1 - p)) * (p - x);
+    }
+    var th = Math.atan(dyc);
+    up.push([x - yt * Math.sin(th), yc + yt * Math.cos(th)]);
+    lo.push([x + yt * Math.sin(th), yc - yt * Math.cos(th)]);
+  }
+  return { up: up, lo: lo };
+}
+
+function wtDrawPerf(t, v, f) {
+  var c = $("wtCanvas");
+  if (!c || !c.width) return;
+  var g = c.getContext("2d");
+  var W = c.width, H = c.height;
+  g.fillStyle = "#060b0c";
+  g.fillRect(0, 0, W, H);
+
+  var wx = W * 0.36, wy = H * 0.56, chord = Math.min(170, W * 0.24);
+  var pxPerM = chord; /* 1 chord = 1 unit of influence radius math */
+
+  /* smoke particles */
+  var i, p, vx, iwx, dyp, wake = f.stalled;
+  var base = v * 2.6;
+  for (i = 0; i < wts.parts.length; i++) {
+    p = wts.parts[i];
+    vx = base * p.s;
+    var dxp = p.x - wx;
+    var near = Math.abs(dxp) < chord * 1.1;
+    if (near) {
+      dyp = p.y - wy;
+      if (dxp < 0 && Math.abs(dyp) < chord * 0.6) {
+        p.y -= 0.35 * (1 + Math.max(0, f.cl));           /* upwash ahead */
+        if (dyp < 0) vx *= 1 + 0.35 * Math.min(1.5, Math.max(0, f.cl)); /* faster over the top */
+      }
+      if (dxp > 0 && Math.abs(dyp) < chord * 0.8) {
+        p.y += 0.18 * Math.max(0, f.cl) + 0.12;          /* downwash behind */
+      }
+      if (wake && dxp > -chord * 0.3 && Math.abs(dyp) < chord * 0.55) {
+        p.x += (Math.random() - 0.5) * 5;               /* separated buffet */
+        p.y += (Math.random() - 0.5) * 6;
+      }
+    }
+    p.x += vx * 0.016;
+    if (p.x > W + 8) { p.x = -8; p.y = Math.random() * H; }
+
+    var trail = Math.min(26, vx * 0.045);
+    var col = "rgba(57,215,255,0.5)";
+    if (near && p.y < wy && p.y > wy - chord * 0.55) col = "rgba(157,255,87,0.75)";   /* suction side */
+    if (wake && dxp > 0 && Math.abs(p.y - wy) < chord * 0.5) col = "rgba(255,150,60,0.8)"; /* stalled wake */
+    g.strokeStyle = col;
+    g.lineWidth = 1.4;
+    g.beginPath();
+    g.moveTo(p.x, p.y);
+    g.lineTo(p.x - trail, p.y);
+    g.stroke();
+  }
+
+  /* the wing: NACA 4-digit-ish profile, pitched by alpha (nose up) */
+  var pts = wtAirfoilPts(wts.camber, wts.thick);
+  var ar = -wts.alpha * Math.PI / 180;
+  var cosA = Math.cos(ar), sinA = Math.sin(ar);
+  function X(xn, yn) {
+    var rx = (xn - 0.25) * chord, ry = -yn * chord;
+    return [wx + rx * cosA - ry * sinA, wy + rx * sinA + ry * cosA];
+  }
+  g.beginPath();
+  var q = X(pts.up[0][0], pts.up[0][1]);
+  g.moveTo(q[0], q[1]);
+  for (i = 1; i < pts.up.length; i++) { q = X(pts.up[i][0], pts.up[i][1]); g.lineTo(q[0], q[1]); }
+  for (i = pts.lo.length - 1; i >= 0; i--) { q = X(pts.lo[i][0], pts.lo[i][1]); g.lineTo(q[0], q[1]); }
+  g.closePath();
+  g.fillStyle = "#14201f";
+  g.fill();
+  g.strokeStyle = f.stalled ? "#ff8ba0" : "#9dff57";
+  g.lineWidth = 2;
+  g.stroke();
+
+  /* balance strut */
+  g.strokeStyle = "#39494b";
+  g.lineWidth = 4;
+  g.beginPath();
+  g.moveTo(wx + chord * 0.25 * cosA, wy + 6);
+  g.lineTo(wx + chord * 0.25 * cosA, H - 4);
+  g.stroke();
+
+  /* labels */
+  g.fillStyle = "#7c8d89";
+  g.font = "10px monospace";
+  g.fillText("TEST SECTION", 10, 16);
+  g.fillText(v + " m/s", 10, 32);
+  if (f.stalled) {
+    g.fillStyle = "#ff8ba0";
+    g.fillText("FLOW SEPARATED", 10, 48);
+  }
+}
+
+function wtJudgeLine(ti, avg) {
+  if (ti === 0) return "Measured lift " + (avg.l / 1000).toFixed(1) + " kN (needed 14.0).";
+  if (ti === 1) return "Measured L/D " + avg.ld.toFixed(1) + " (needed 20.0) at " + (avg.l / 1000).toFixed(1) + " kN lift.";
+  return "Measured lift " + (avg.l / 1000).toFixed(1) + " kN (needed 8.0), stall margin " + avg.margin.toFixed(1) + " deg (needed 3.0).";
+}
+
+function wtHint(ti, avg) {
+  var ac = wtAlphaCrit(wts.camber);
+  if (ti === 0 && avg.l < 14000) return "Hint: more lift means more camber and more angle, but the wing stalls at " + ac.toFixed(1) + " deg with this camber.";
+  if (ti === 1) return "Hint: drag is eating the glide. Try a thinner wing and a smaller angle, near the L/D sweet spot.";
+  if (ti === 2 && avg.margin < 3) return "Hint: too close to the buffet. Back the angle off and add camber to keep the lift.";
+  if (ti === 2) return "Hint: not enough lift at this speed. More camber, more angle, but keep 3 degrees of margin.";
+  return "";
+}
+
+function wtRunTrial(ti) {
+  if (wts.running) return;
+  wts.running = true;
+  wts.trialV = WT_TRIALS[ti].v;
+  var ids = ["wtAlpha", "wtCamber", "wtThick", "wtV"];
+  ids.forEach(function (id) { $(id).disabled = true; });
+  for (var i = 0; i < 3; i++) $("wtRun" + i).disabled = true;
+  $("wtResult").className = "wt-result";
+  $("wtResult").textContent = WT_TRIALS[ti].name + " blowing at " + WT_TRIALS[ti].v + " m/s. Stand clear of the intake.";
+  var acc = { l: 0, d: 0, ld: 0, margin: 0, n: 0 };
+  var dur = 3.2, t0 = performance.now();
+  function frame(now) {
+    var el2 = (now - t0) / 1000;
+    var f = wtForces(wts.camber, wts.thick, wts.alpha, wts.trialV);
+    acc.l += f.l; acc.d += f.d; acc.ld += f.ld; acc.margin += f.margin; acc.n++;
+    wtTelUpdate(f);
+    wtDrawPerf(now / 1000, wts.trialV, f);
+    if (el2 < dur) { wts.anim = requestAnimationFrame(frame); return; }
+    finish();
+  }
+  function finish() {
+    wts.running = false;
+    wts.trialV = null;
+    ids.forEach(function (id) { $(id).disabled = false; });
+    for (var k = 0; k < 3; k++) $("wtRun" + k).disabled = false;
+    var avg = { l: acc.l / acc.n, d: acc.d / acc.n, ld: acc.ld / acc.n, margin: acc.margin / acc.n };
+    var tr = WT_TRIALS[ti];
+    var ok = tr.judge(avg);
+    var badge = $("wtBadge" + ti);
+    if (ok) {
+      wts.passed[ti] = true;
+      wts.setups[ti] = { camber: wts.camber, thick: wts.thick, alpha: wts.alpha, l: avg.l, ld: avg.ld, margin: avg.margin };
+      badge.textContent = "pass";
+      badge.className = "badge pass";
+      $("wtResult").className = "wt-result win";
+      $("wtResult").textContent = tr.name + ": PASSED. " + wtJudgeLine(ti, avg);
+      toast(tr.name + " passed");
+    } else {
+      badge.textContent = "fail";
+      badge.className = "badge fail";
+      $("wtResult").className = "wt-result fail";
+      $("wtResult").textContent = tr.name + ": FAILED. " + wtJudgeLine(ti, avg) + " " + wtHint(ti, avg);
+    }
+    if (wts.passed[0] && wts.passed[1] && wts.passed[2]) {
+      $("wtCertBtn").disabled = false;
+      $("wtResult").textContent += " ALL THREE TRIALS PASSED. The tunnel will sign your log.";
+    }
+    wtRefresh();
+  }
+  wts.anim = requestAnimationFrame(frame);
+}
+
+function wtCertificate() {
+  if (!(wts.passed[0] && wts.passed[1] && wts.passed[2])) return;
+  var v = (typeof currentInvention === "function") ? currentInvention() : null;
+  var nm = v ? v.name : "unnamed prototype";
+  var code = v ? v.code : "n/a";
+  var lines = wts.setups.map(function (s, i) {
+    return "  " + WT_TRIALS[i].name + ": camber " + s.camber.toFixed(1) + "%, thickness " +
+      s.thick.toFixed(1) + "%, alpha " + s.alpha.toFixed(1) + " deg, lift " +
+      (s.l / 1000).toFixed(1) + " kN, L/D " + s.ld.toFixed(1) + ", margin " + s.margin.toFixed(1) + " deg";
+  });
+  var txt =
+    "WIND TUNNEL LOG\n" +
+    "Garage Inventions Aerodynamics Bench\n" +
+    "====================================\n" +
+    "Invention : " + nm + " (" + code + ")\n" +
+    "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+    "Wing      : 10.0 m^2, aspect ratio 6, Oswald 0.90, sea level\n" +
+    "Result    : ALL THREE TUNNEL TRIALS PASSED\n" +
+    "Winning setups:\n" + lines.join("\n") + "\n" +
+    "\nHeavy lift at 38 m/s, glide efficiency at 60 m/s, carrier approach\n" +
+    "at 30 m/s with stall margin held throughout.\n" +
+    "\nSigned by the tunnel. The air does not negotiate.\n";
+  var blob = new Blob([txt], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "windtunnel-log.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast("Tunnel log downloaded");
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", wtBuild);
+} else {
+  wtBuild();
 }
 
 })();
