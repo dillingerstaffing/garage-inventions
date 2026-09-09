@@ -828,6 +828,22 @@
   "failure": "Wiring a rung with no load produces a dead short, and a coil fighting its own contact will buzz until the shift is failed on the spot.",
   "transcript": "The seal-in contact closed on the third scan and the lamp stayed lit after I let go of START. I have now built a one-bit memory out of a relay and I understand why the old panels had that particular smell of warm phenolic and confidence."
 },
+{
+  "names": [
+    "The Overspray Ghosts",
+    "The Fish-Eye Collective",
+    "The Orange Peel Society"
+  ],
+  "purposes": [
+    "haunt booth filters with the color of every job ever sprayed",
+    "appear in fresh clearcoat whenever silicone is mentioned nearby",
+    "ensure no panel is ever quite as flat as the brochure promised"
+  ],
+  "built": "assembled from dried paint skins peeled off a booth wall in 1987",
+  "power": "can match any factory color from memory, but only on Tuesdays",
+  "failure": "dissolve instantly when shown a properly maintained HVLP gun",
+  "transcript": "<strong>Ghost:</strong> We are the overspray of ten thousand fenders. <strong>Tech:</strong> Then why is the hood pink? <strong>Ghost:</strong> Somebody sprayed a convertible in 1994 and we never really left."
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -9398,6 +9414,537 @@ function gyScoreLift(st) {
         scan: rrScan,
         runSteps: rrRunSteps,
         rungText: rrRungText
+      }
+    };
+  }
+
+})();
+/* ============================================================
+   THE PAINT BOOTH
+   An automotive paint mixing and spraying bench. Mix six toners
+   to match the target chip (live delta-E in CIELAB), set gun
+   distance, travel speed, and coats, then spray the panel. Film
+   build must land inside spec, with no runs, no dry spray, and
+   no mottling on metallics. Three jobs, graded separately, with
+   a downloadable spray ticket when all three pass.
+   Self-contained IIFE, local helpers only, no page globals.
+   ============================================================ */
+(function () {
+
+  /* ---------- tiny local helpers (no reliance on page globals) ---------- */
+  var pb$ = function (id) { return document.getElementById(id); };
+  function pbEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function pbToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = pb$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function pbCss(c) {
+    return "#" + ((1 << 24) + (Math.round(c[0]) << 16) + (Math.round(c[1]) << 8) + Math.round(c[2])).toString(16).slice(1);
+  }
+
+  /* ---------- pure color and spray model (testable, no DOM) ---------- */
+  var PB_TONERS = [
+    { name: "Bright White", rgb: [242, 242, 238] },
+    { name: "Jet Black",    rgb: [14, 14, 16] },
+    { name: "Torch Red",    rgb: [198, 24, 28] },
+    { name: "Sun Yellow",   rgb: [244, 196, 24] },
+    { name: "Cobalt Blue",  rgb: [28, 62, 178] },
+    { name: "Glacier Pearl", rgb: [206, 224, 232] }
+  ];
+  var PB_JOBS = [
+    { name: "Job 1: Shop Black",
+      desc: "Solid gloss black, fleet work. Match within 2.5 delta-E and lay 4.0 to 6.0 mils dry.",
+      target: [18, 18, 20], maxDE: 2.5, filmLo: 4.0, filmHi: 6.0, metallic: false },
+    { name: "Job 2: Torch Red",
+      desc: "Metallic red, show car. Match within 1.5 delta-E and lay 4.0 to 6.0 mils dry. Metallics mottle if you crowd the gun under 14 cm.",
+      target: [178, 30, 34], maxDE: 1.5, filmLo: 4.0, filmHi: 6.0, metallic: true },
+    { name: "Job 3: Pearl Mist",
+      desc: "Tri-stage pearl, concours. Match within 1.0 delta-E and lay 5.0 to 7.0 mils dry. No room for error.",
+      target: [214, 226, 232], maxDE: 1.0, filmLo: 5.0, filmHi: 7.0, metallic: true }
+  ];
+
+  function pbMix(parts) {
+    var t = 0, r = 0, g = 0, b = 0, i;
+    for (i = 0; i < PB_TONERS.length; i++) t += Math.max(0, parts[i] || 0);
+    if (t <= 0) return [150, 150, 150];
+    for (i = 0; i < PB_TONERS.length; i++) {
+      var p = parts[i] || 0;
+      r += PB_TONERS[i].rgb[0] * p;
+      g += PB_TONERS[i].rgb[1] * p;
+      b += PB_TONERS[i].rgb[2] * p;
+    }
+    return [r / t, g / t, b / t];
+  }
+
+  function pbRgbToLab(rgb) {
+    function lin(c) {
+      c /= 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function f(t) { return t > 0.008856 ? Math.pow(t, 1 / 3) : (7.787 * t) + 16 / 116; }
+    var r = lin(rgb[0]), g = lin(rgb[1]), b = lin(rgb[2]);
+    var fx = f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
+    var fy = f(r * 0.2126 + g * 0.7152 + b * 0.0722);
+    var fz = f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+  }
+
+  function pbDeltaE(a, b) {
+    var la = pbRgbToLab(a), lb = pbRgbToLab(b);
+    var dl = la[0] - lb[0], da = la[1] - lb[1], db = la[2] - lb[2];
+    return Math.sqrt(dl * dl + da * da + db * db);
+  }
+
+  function pbSpray(distance, speed, coats) {
+    var te = 0.95 - 0.025 * (distance - 15);
+    te = Math.max(0.35, Math.min(0.95, te));
+    var wetPerCoat = 3.0 * (15 / distance) * (25 / speed) * (te / 0.8);
+    var dryTotal = wetPerCoat * coats * 0.55;
+    var defects = [];
+    if (wetPerCoat > 3.4) defects.push("runs");
+    if (distance > 25 || speed > 33) defects.push("dry spray");
+    return { wetPerCoat: wetPerCoat, dryTotal: dryTotal, te: te, defects: defects };
+  }
+
+  function pbGrade(job, parts, distance, speed, coats) {
+    var mix = pbMix(parts);
+    var de = pbDeltaE(mix, job.target);
+    var s = pbSpray(distance, speed, coats);
+    var notes = [];
+    var pass = true;
+    if (de > job.maxDE) {
+      pass = false;
+      notes.push("color off at " + de.toFixed(2) + " delta-E (needs " + job.maxDE.toFixed(1) + " or less)");
+    }
+    if (s.dryTotal < job.filmLo || s.dryTotal > job.filmHi) {
+      pass = false;
+      notes.push("film build " + s.dryTotal.toFixed(1) + " mils dry, spec is " + job.filmLo.toFixed(1) + " to " + job.filmHi.toFixed(1));
+    }
+    if (s.defects.indexOf("runs") >= 0) {
+      pass = false;
+      notes.push("runs: too wet, back the gun off or move faster");
+    }
+    if (s.defects.indexOf("dry spray") >= 0) {
+      pass = false;
+      notes.push("dry spray: too far or too fast, move in closer and slow down");
+    }
+    if (job.metallic && distance < 14) {
+      pass = false;
+      notes.push("mottling: metallics hate a crowded gun, hold 14 cm or more");
+    }
+    return { pass: pass, de: de, film: s.dryTotal, te: s.te, notes: notes, mix: mix };
+  }
+
+  /* ---------- state ---------- */
+  var pbJobIdx = 0;
+  var pbParts = [17, 17, 17, 17, 16, 16];
+  var pbDistance = 18, pbSpeed = 25, pbCoats = 3;
+  var pbPass = [false, false, false];
+  var pbResults = [null, null, null];
+  var pbPanel = [150, 150, 150];
+  var pbSpraying = false;
+
+  /* ---------- styles ---------- */
+  var PB_CSS = [
+    ".pb-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".pb-overlay.open{display:flex;}",
+    ".pb-panel{width:min(920px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+    ".pb-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".pb-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".pb-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}",
+    ".pb-tabs button{min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:#72827f;}",
+    ".pb-tabs button.on{border-color:var(--acid);color:var(--acid);}",
+    ".pb-tabs button.done{border-color:var(--cyan);color:var(--cyan);}",
+    ".pb-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}",
+    ".pb-card{border:1px solid var(--line);background:var(--panel-2);padding:12px;}",
+    ".pb-card h5{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".pb-chips{display:flex;gap:10px;margin-bottom:10px;}",
+    ".pb-chip{flex:1;text-align:center;}",
+    ".pb-chip .sw{height:52px;border:1px solid var(--line);margin-bottom:4px;}",
+    ".pb-chip p{margin:0;font-size:10px;color:#7c8d89;text-transform:uppercase;letter-spacing:.1em;}",
+    ".pb-de{font-family:monospace;font-size:13px;color:var(--ink);margin:0 0 10px;}",
+    ".pb-de.good{color:var(--acid);}",
+    ".pb-de.bad{color:#ff8ba0;}",
+    ".pb-row{margin-bottom:8px;}",
+    ".pb-row label{display:flex;justify-content:space-between;font-size:11px;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px;}",
+    ".pb-row label span{font-family:monospace;color:var(--ink);}",
+    ".pb-row input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+    ".pb-film{font-family:monospace;font-size:12px;line-height:1.7;color:var(--ink);}",
+    ".pb-film .warn{color:var(--orange);}",
+    ".pb-film .bad{color:#ff8ba0;}",
+    ".pb-film .good{color:var(--acid);}",
+    ".pb-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:12px;}",
+    ".pb-stage canvas{display:block;width:100%;height:230px;}",
+    ".pb-result{padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.7;margin-bottom:10px;}",
+    ".pb-result.win{border-color:var(--acid);color:var(--acid);}",
+    ".pb-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".pb-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".pb-foot button{min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;}",
+    ".pb-foot .go{background:var(--acid);border:1px solid var(--acid);color:#06110c;flex:2;}",
+    ".pb-foot .go:disabled{opacity:.35;cursor:default;}",
+    ".pb-foot .ghost{background:#0a1416;border:1px solid var(--line);color:#72827f;flex:1;}",
+    "@media (max-width:640px){.pb-grid{grid-template-columns:1fr;}}"
+  ].join("\n");
+
+  /* ---------- booth animation ---------- */
+  var pbCanvas = null, pbCtx = null, pbParts2 = [], pbGunX = 0, pbGunDir = 1, pbAnimId = null;
+
+  function pbDrawBooth() {
+    if (!pbCtx || !pbCanvas) return;
+    var W = pbCanvas.width, H = pbCanvas.height;
+    pbCtx.clearRect(0, 0, W, H);
+    pbCtx.fillStyle = "#060b0c";
+    pbCtx.fillRect(0, 0, W, H);
+    var pw = W * 0.52, ph = H * 0.52, px = (W - pw) / 2, py = H * 0.30;
+    pbCtx.fillStyle = pbCss(pbPanel);
+    pbCtx.fillRect(px, py, pw, ph);
+    pbCtx.strokeStyle = "#2a3a38";
+    pbCtx.strokeRect(px, py, pw, ph);
+    var gx = px + pbGunX * pw, gy = py - 26;
+    pbCtx.fillStyle = "#9aa8a4";
+    pbCtx.fillRect(gx - 5, gy - 8, 10, 16);
+    if (pbSpraying) {
+      pbCtx.fillStyle = "rgba(190,220,215,.18)";
+      pbCtx.beginPath();
+      pbCtx.moveTo(gx, gy + 8);
+      pbCtx.lineTo(gx - 26, py);
+      pbCtx.lineTo(gx + 26, py);
+      pbCtx.closePath();
+      pbCtx.fill();
+    }
+    var i, p;
+    for (i = pbParts2.length - 1; i >= 0; i--) {
+      p = pbParts2[i];
+      p.x += p.vx; p.y += p.vy; p.life -= 1;
+      if (p.life <= 0) { pbParts2.splice(i, 1); continue; }
+      pbCtx.fillStyle = p.color;
+      pbCtx.fillRect(p.x, p.y, 2, 2);
+    }
+    pbCtx.fillStyle = "#3d4f4c";
+    pbCtx.font = "10px monospace";
+    pbCtx.fillText("BOOTH 3", 8, 14);
+  }
+
+  function pbAnimLoop() {
+    if (!pbCanvas || !pb$("pbOverlay") || !pb$("pbOverlay").classList.contains("open")) {
+      pbAnimId = null;
+      return;
+    }
+    pbGunX += 0.008 * pbGunDir;
+    if (pbGunX > 1) { pbGunX = 1; pbGunDir = -1; }
+    if (pbGunX < 0) { pbGunX = 0; pbGunDir = 1; }
+    if (pbSpraying && pbParts2.length < 220) {
+      var W = pbCanvas.width, H = pbCanvas.height;
+      var pw = W * 0.52, px = (W - pw) / 2, py = H * 0.30;
+      var gx = px + pbGunX * pw;
+      var mixCss = pbCss(pbMix(pbParts));
+      for (var k = 0; k < 4; k++) {
+        pbParts2.push({
+          x: gx + (Math.random() - 0.5) * 10,
+          y: py - 18,
+          vx: (Math.random() - 0.5) * 1.6,
+          vy: 1 + Math.random() * 2,
+          life: 26 + Math.random() * 14,
+          color: mixCss
+        });
+      }
+    }
+    pbDrawBooth();
+    pbAnimId = requestAnimationFrame(pbAnimLoop);
+  }
+
+  function pbKickAnim() {
+    if (pbAnimId == null && typeof requestAnimationFrame === "function") {
+      pbAnimLoop();
+    } else {
+      pbDrawBooth();
+    }
+  }
+
+  /* ---------- ui construction ---------- */
+  var pbEls = {};
+
+  function pbSliderRow(label, min, max, step, val, fmt, oninput) {
+    var row = pbEl("div", "pb-row");
+    var lab = pbEl("label", "", label + "<span></span>");
+    var span = lab.querySelector("span");
+    var input = pbEl("input");
+    input.type = "range";
+    input.min = min; input.max = max; input.step = step; input.value = val;
+    function upd() {
+      span.textContent = fmt(parseFloat(input.value));
+      oninput(parseFloat(input.value));
+    }
+    input.addEventListener("input", upd);
+    upd();
+    row.appendChild(lab);
+    row.appendChild(input);
+    return { row: row, input: input, set: function (v) { input.value = v; upd(); } };
+  }
+
+  function pbRefresh() {
+    var job = PB_JOBS[pbJobIdx];
+    var mix = pbMix(pbParts);
+    var de = pbDeltaE(mix, job.target);
+    var s = pbSpray(pbDistance, pbSpeed, pbCoats);
+    pbEls.mixSw.style.background = pbCss(mix);
+    pbEls.targetSw.style.background = pbCss(job.target);
+    pbEls.deLine.textContent = "color match: " + de.toFixed(2) + " delta-E (needs " + job.maxDE.toFixed(1) + " or less)";
+    pbEls.deLine.className = "pb-de " + (de <= job.maxDE ? "good" : "bad");
+    var html = "transfer efficiency: " + Math.round(s.te * 100) + "%<br>" +
+      "wet per coat: " + s.wetPerCoat.toFixed(2) + " mils<br>" +
+      "total dry: <span class=\"" + (s.dryTotal >= job.filmLo && s.dryTotal <= job.filmHi ? "good" : "bad") + "\">" +
+      s.dryTotal.toFixed(1) + " mils</span> (spec " + job.filmLo.toFixed(1) + " to " + job.filmHi.toFixed(1) + ")";
+    if (s.defects.length || (job.metallic && pbDistance < 14)) {
+      var warns = s.defects.slice();
+      if (job.metallic && pbDistance < 14) warns.push("mottling risk");
+      html += "<br><span class=\"warn\">warning: " + warns.join(", ") + "</span>";
+    }
+    pbEls.filmLine.innerHTML = html;
+    pbEls.jobDesc.textContent = job.desc;
+  }
+
+  function pbSelectJob(i) {
+    pbJobIdx = i;
+    var tabs = pbEls.tabs.querySelectorAll("button");
+    for (var k = 0; k < tabs.length; k++) {
+      tabs[k].className = (k === i ? "on" : "") + (pbPass[k] ? " done" : "");
+      tabs[k].className = tabs[k].className.trim();
+    }
+    pbRefresh();
+    pbShowResult();
+  }
+
+  function pbShowResult() {
+    var r = pbResults[pbJobIdx];
+    var box = pbEls.result;
+    if (!r) {
+      box.className = "pb-result";
+      box.textContent = "No spray yet on this job. Mix, set the gun, and spray the panel.";
+      return;
+    }
+    box.className = "pb-result " + (r.pass ? "win" : "fail");
+    var t = (r.pass ? "PASS" : "FAIL") + " " + PB_JOBS[pbJobIdx].name +
+      " (delta-E " + r.de.toFixed(2) + ", film " + r.film.toFixed(1) + " mils)";
+    if (r.notes.length) t += "\n" + r.notes.join("\n");
+    box.textContent = t;
+  }
+
+  function pbCheckTicket() {
+    var all = pbPass[0] && pbPass[1] && pbPass[2];
+    pbEls.ticket.disabled = !all;
+    if (all) pbToast("All three jobs passed, spray ticket unlocked");
+  }
+
+  function pbSprayPanel() {
+    if (pbSpraying) return;
+    pbSpraying = true;
+    pbEls.spray.disabled = true;
+    pbPanel = [150, 150, 150];
+    pbKickAnim();
+    var coatsDone = 0;
+    var mix = pbMix(pbParts);
+    var step = setInterval(function () {
+      coatsDone++;
+      for (var i = 0; i < 3; i++) {
+        pbPanel[i] = pbPanel[i] + (mix[i] - pbPanel[i]) * 0.55;
+      }
+      pbDrawBooth();
+      if (coatsDone >= pbCoats) {
+        clearInterval(step);
+        pbSpraying = false;
+        pbEls.spray.disabled = false;
+        var r = pbGrade(PB_JOBS[pbJobIdx], pbParts, pbDistance, pbSpeed, pbCoats);
+        pbResults[pbJobIdx] = r;
+        if (r.pass) pbPass[pbJobIdx] = true;
+        pbShowResult();
+        pbSelectJob(pbJobIdx);
+        pbCheckTicket();
+        pbToast(r.pass ? "Panel passed" : "Panel failed, check the notes");
+      }
+    }, 650);
+  }
+
+  function pbTicket() {
+    var d = new Date();
+    var lines = [
+      "PAINT BOOTH SPRAY TICKET",
+      "Garage Inventions paint booth, " + d.toISOString().slice(0, 10),
+      ""
+    ];
+    for (var i = 0; i < 3; i++) {
+      var r = pbResults[i];
+      lines.push(PB_JOBS[i].name + ": " + (r && r.pass ? "PASS" : "FAIL") +
+        " (delta-E " + (r ? r.de.toFixed(2) : "-") + ", film " + (r ? r.film.toFixed(1) : "-") + " mils)");
+    }
+    lines.push("", "Signed: the booth");
+    var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    var a = pbEl("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "paint-booth-spray-ticket.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 4000);
+    pbToast("Spray ticket downloaded");
+  }
+
+  function pbReset() {
+    pbParts = [17, 17, 17, 17, 16, 16];
+    pbDistance = 18; pbSpeed = 25; pbCoats = 3;
+    pbPanel = [150, 150, 150];
+    for (var i = 0; i < pbEls.tonerInputs.length; i++) pbEls.tonerInputs[i].set(pbParts[i]);
+    pbEls.distSet(pbDistance);
+    pbEls.speedSet(pbSpeed);
+    pbEls.coatsSet(pbCoats);
+    pbRefresh();
+  }
+
+  function pbBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || pb$("pbBtn")) return;
+
+    var st = document.createElement("style");
+    st.textContent = PB_CSS;
+    document.head.appendChild(st);
+
+    var b = pbEl("button", "secondary", "Open the Paint Booth");
+    b.id = "pbBtn";
+    b.addEventListener("click", function () {
+      pb$("pbOverlay").classList.add("open");
+      pbKickAnim();
+      pbRefresh();
+    });
+    box.appendChild(b);
+
+    var ov = pbEl("div", "pb-overlay");
+    ov.id = "pbOverlay";
+    var panel = pbEl("div", "pb-panel");
+    panel.innerHTML =
+      "<h3>The Paint Booth</h3>" +
+      '<p class="pb-sub">Mix toners to match the chip, set the gun, spray the panel. Color is scored in delta-E, film build in mils, defects fail the job.</p>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    var tabs = pbEl("div", "pb-tabs");
+    pbEls.tabs = tabs;
+    for (var ti = 0; ti < 3; ti++) {
+      (function (idx) {
+        var t = pbEl("button", idx === 0 ? "on" : "", PB_JOBS[idx].name);
+        t.addEventListener("click", function () { pbSelectJob(idx); });
+        tabs.appendChild(t);
+      })(ti);
+    }
+    panel.appendChild(tabs);
+    pbEls.jobDesc = pbEl("p", "pb-sub", "");
+    panel.appendChild(pbEls.jobDesc);
+
+    var grid = pbEl("div", "pb-grid");
+    panel.appendChild(grid);
+
+    var lab = pbEl("div", "pb-card");
+    lab.innerHTML = "<h5>Color lab</h5>";
+    var chips = pbEl("div", "pb-chips");
+    var c1 = pbEl("div", "pb-chip", '<div class="sw"></div><p>target</p>');
+    var c2 = pbEl("div", "pb-chip", '<div class="sw"></div><p>your mix</p>');
+    pbEls.targetSw = c1.querySelector(".sw");
+    pbEls.mixSw = c2.querySelector(".sw");
+    chips.appendChild(c1);
+    chips.appendChild(c2);
+    lab.appendChild(chips);
+    pbEls.deLine = pbEl("p", "pb-de", "");
+    lab.appendChild(pbEls.deLine);
+    pbEls.tonerInputs = [];
+    for (var gi = 0; gi < PB_TONERS.length; gi++) {
+      (function (idx) {
+        var s = pbSliderRow(PB_TONERS[idx].name, 0, 100, 1, pbParts[idx],
+          function (v) { return Math.round(v) + " pts"; },
+          function (v) { pbParts[idx] = v; pbRefresh(); });
+        pbEls.tonerInputs.push(s);
+        lab.appendChild(s.row);
+      })(gi);
+    }
+    grid.appendChild(lab);
+
+    var gun = pbEl("div", "pb-card");
+    gun.innerHTML = "<h5>Spray gun</h5>";
+    var ds = pbSliderRow("Gun distance", 10, 30, 0.5, pbDistance,
+      function (v) { return v.toFixed(1) + " cm"; },
+      function (v) { pbDistance = v; pbRefresh(); });
+    var ss = pbSliderRow("Travel speed", 10, 40, 0.5, pbSpeed,
+      function (v) { return v.toFixed(1) + " cm/s"; },
+      function (v) { pbSpeed = v; pbRefresh(); });
+    var cs = pbSliderRow("Coats", 1, 4, 1, pbCoats,
+      function (v) { return String(Math.round(v)); },
+      function (v) { pbCoats = Math.round(v); pbRefresh(); });
+    pbEls.distSet = ds.set; pbEls.speedSet = ss.set; pbEls.coatsSet = cs.set;
+    gun.appendChild(ds.row);
+    gun.appendChild(ss.row);
+    gun.appendChild(cs.row);
+    pbEls.filmLine = pbEl("p", "pb-film", "");
+    gun.appendChild(pbEls.filmLine);
+    grid.appendChild(gun);
+
+    var stage = pbEl("div", "pb-stage");
+    pbCanvas = pbEl("canvas");
+    pbCanvas.width = 640;
+    pbCanvas.height = 230;
+    pbCtx = pbCanvas.getContext("2d");
+    stage.appendChild(pbCanvas);
+    panel.appendChild(stage);
+
+    pbEls.result = pbEl("div", "pb-result", "");
+    panel.appendChild(pbEls.result);
+
+    var foot = pbEl("div", "pb-foot");
+    pbEls.spray = pbEl("button", "go", "Spray the panel");
+    pbEls.spray.addEventListener("click", pbSprayPanel);
+    var reset = pbEl("button", "ghost", "Reset");
+    reset.addEventListener("click", pbReset);
+    pbEls.ticket = pbEl("button", "ghost", "Download spray ticket");
+    pbEls.ticket.disabled = true;
+    pbEls.ticket.addEventListener("click", pbTicket);
+    var close = pbEl("button", "ghost", "Close");
+    close.addEventListener("click", function () {
+      pb$("pbOverlay").classList.remove("open");
+    });
+    foot.appendChild(pbEls.spray);
+    foot.appendChild(reset);
+    foot.appendChild(pbEls.ticket);
+    foot.appendChild(close);
+    panel.appendChild(foot);
+
+    pbSelectJob(0);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", pbBuild);
+  } else {
+    pbBuild();
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      PB: {
+        TONERS: PB_TONERS,
+        JOBS: PB_JOBS,
+        mix: pbMix,
+        rgbToLab: pbRgbToLab,
+        deltaE: pbDeltaE,
+        spray: pbSpray,
+        grade: pbGrade
       }
     };
   }

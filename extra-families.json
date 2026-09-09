@@ -286,5 +286,21 @@
     "power": "24V control rail, retentive coils, and a PLC-style scan loop that runs entirely in your browser.",
     "failure": "Wiring a rung with no load produces a dead short, and a coil fighting its own contact will buzz until the shift is failed on the spot.",
     "transcript": "The seal-in contact closed on the third scan and the lamp stayed lit after I let go of START. I have now built a one-bit memory out of a relay and I understand why the old panels had that particular smell of warm phenolic and confidence."
+  },
+  {
+    "names": [
+      "The Overspray Ghosts",
+      "The Fish-Eye Collective",
+      "The Orange Peel Society"
+    ],
+    "purposes": [
+      "haunt booth filters with the color of every job ever sprayed",
+      "appear in fresh clearcoat whenever silicone is mentioned nearby",
+      "ensure no panel is ever quite as flat as the brochure promised"
+    ],
+    "built": "assembled from dried paint skins peeled off a booth wall in 1987",
+    "power": "can match any factory color from memory, but only on Tuesdays",
+    "failure": "dissolve instantly when shown a properly maintained HVLP gun",
+    "transcript": "<strong>Ghost:</strong> We are the overspray of ten thousand fenders. <strong>Tech:</strong> Then why is the hood pink? <strong>Ghost:</strong> Somebody sprayed a convertible in 1994 and we never really left."
   }
 ]
