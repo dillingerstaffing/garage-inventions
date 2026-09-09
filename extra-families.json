@@ -126,5 +126,21 @@
     "power": "24V control loop with a 4 to 20 milliamp soul.",
     "failure": "Integral windup during a sensor outage can command full drive for up to nine seconds, which the manual describes as 'enthusiasm'.",
     "transcript": "Set Kp to 2.4 and the belt stopped arguing. <strong>Settle time 0.82 seconds.</strong> The foreman nodded once, which around here is a standing ovation."
+  },
+  {
+    "names": [
+      "Silicon Anvil",
+      "Opcode Oracle",
+      "Trapdoor Tinkerer"
+    ],
+    "purposes": [
+      "Hand-assembles RISC-V programs on the workbench and steps a real 32-bit core through them, one instruction at a time.",
+      "Grades apprentice assembly against bench trials and issues certificates when the silicon halts clean.",
+      "Collects illegal instructions in a jar labeled 'evidence' and displays them to visiting skeptics."
+    ],
+    "built": "One RV32I core, 4 KB of memory, thirty-two registers, a UART with strong opinions, and a jar.",
+    "power": "Runs on curiosity and a 16 millisecond timer. Idle draw is zero because it refuses to idle.",
+    "failure": "A missing ecall halt will let the program wander off the end of memory, where it will be arrested by the trap handler and held without bail.",
+    "transcript": "The first apprentice put 42 in a0 on the second try and has not stopped talking about it. The second apprentice stored <strong>0xCAFE</strong> at address 0x100 and now refers to himself as the Memory Courier in third person. The jar is getting full."
   }
 ]

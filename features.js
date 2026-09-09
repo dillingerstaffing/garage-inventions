@@ -2253,4 +2253,776 @@
     gvBuild();
   }
 
+
+/* Silicon Anvil core: RV32I subset assembler + interpreter. No DOM, pure logic.
+   Shared verbatim between node tests and the features.js module. */
+"use strict";
+
+var RV_ABI = {zero:0,ra:1,sp:2,gp:3,tp:4,t0:5,t1:6,t2:7,s0:8,fp:8,s1:9,a0:10,a1:11,a2:12,a3:13,a4:14,a5:15,a6:16,a7:17,s2:18,s3:19,s4:20,s5:21,s6:22,s7:23,s8:24,s9:25,s10:26,s11:27,t3:28,t4:29,t5:30,t6:31};
+var RV_REGNAMES = ["zero","ra","sp","gp","tp","t0","t1","t2","s0","s1","a0","a1","a2","a3","a4","a5","a6","a7","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","t3","t4","t5","t6"];
+
+function rvParseReg(s, line) {
+  s = String(s).trim().toLowerCase();
+  var n;
+  if (s.charAt(0) === "x") n = parseInt(s.slice(1), 10);
+  else if (RV_ABI.hasOwnProperty(s)) n = RV_ABI[s];
+  else throw { line: line, msg: "bad register '" + s + "'" };
+  if (isNaN(n) || n < 0 || n > 31 || (s.charAt(0) === "x" && !/^\d+$/.test(s.slice(1)))) throw { line: line, msg: "bad register '" + s + "'" };
+  return n;
+}
+function rvParseImm(s, line) {
+  s = String(s).trim().toLowerCase();
+  var neg = false;
+  if (s.charAt(0) === "-") { neg = true; s = s.slice(1); }
+  else if (s.charAt(0) === "+") s = s.slice(1);
+  var v = (s.indexOf("0x") === 0) ? parseInt(s, 16) : parseInt(s, 10);
+  if (isNaN(v)) throw { line: line, msg: "bad number '" + s + "'" };
+  return neg ? -v : v;
+}
+function rvParseMem(s, line) {
+  var m = String(s).trim().match(/^(-?[^\s\(]*)\(\s*([^\)\s]+)\s*\)$/);
+  if (!m) throw { line: line, msg: "bad memory operand '" + s + "' (want off(reg))" };
+  return { off: m[1] === "" ? 0 : rvParseImm(m[1], line), rs: rvParseReg(m[2], line) };
+}
+
+var RV_OPS = {
+  addi:{op:0x13,f3:0,ty:"I"}, slti:{op:0x13,f3:2,ty:"I"}, sltiu:{op:0x13,f3:3,ty:"I"},
+  xori:{op:0x13,f3:4,ty:"I"}, ori:{op:0x13,f3:6,ty:"I"}, andi:{op:0x13,f3:7,ty:"I"},
+  slli:{op:0x13,f3:1,ty:"Is"}, srli:{op:0x13,f3:5,ty:"Is",f7:0}, srai:{op:0x13,f3:5,ty:"Is",f7:32},
+  add:{op:0x33,f3:0,f7:0,ty:"R"}, sub:{op:0x33,f3:0,f7:32,ty:"R"},
+  sll:{op:0x33,f3:1,f7:0,ty:"R"}, slt:{op:0x33,f3:2,f7:0,ty:"R"}, sltu:{op:0x33,f3:3,f7:0,ty:"R"},
+  xor:{op:0x33,f3:4,f7:0,ty:"R"}, srl:{op:0x33,f3:5,f7:0,ty:"R"}, sra:{op:0x33,f3:5,f7:32,ty:"R"},
+  or:{op:0x33,f3:6,f7:0,ty:"R"}, and:{op:0x33,f3:7,f7:0,ty:"R"},
+  lb:{op:0x03,f3:0,ty:"L"}, lh:{op:0x03,f3:1,ty:"L"}, lw:{op:0x03,f3:2,ty:"L"},
+  lbu:{op:0x03,f3:4,ty:"L"}, lhu:{op:0x03,f3:5,ty:"L"},
+  sb:{op:0x23,f3:0,ty:"S"}, sh:{op:0x23,f3:1,ty:"S"}, sw:{op:0x23,f3:2,ty:"S"},
+  beq:{op:0x63,f3:0,ty:"B"}, bne:{op:0x63,f3:1,ty:"B"}, blt:{op:0x63,f3:4,ty:"B"},
+  bge:{op:0x63,f3:5,ty:"B"}, bltu:{op:0x63,f3:6,ty:"B"}, bgeu:{op:0x63,f3:7,ty:"B"},
+  jal:{op:0x6F,ty:"J"}, jalr:{op:0x67,f3:0,ty:"Jr"},
+  lui:{op:0x37,ty:"U"}, auipc:{op:0x17,ty:"U"},
+  ecall:{op:0x73,ty:"E"}
+};
+
+function rvEncR(f7, rs2, rs1, f3, rd, op) { return (((f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) >>> 0); }
+function rvEncI(imm, rs1, f3, rd, op) { return ((((imm & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op) >>> 0); }
+function rvEncS(imm, rs2, rs1, f3, op) {
+  imm &= 0xFFF;
+  return (((((imm >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | ((imm & 0x1F) << 7) | op) >>> 0);
+}
+function rvEncB(off, rs2, rs1, f3, op) {
+  var w = ((((off >> 12) & 1) << 31) | (((off >> 11) & 1) << 7) | (((off >> 5) & 0x3F) << 25) | (((off >> 1) & 0xF) << 8));
+  return ((w | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | op) >>> 0);
+}
+function rvEncU(imm20, rd, op) { return ((((imm20 & 0xFFFFF) << 12) | (rd << 7) | op) >>> 0); }
+function rvEncJ(off, rd, op) {
+  var w = ((((off >> 20) & 1) << 31) | (((off >> 12) & 0xFF) << 12) | (((off >> 11) & 1) << 20) | (((off >> 1) & 0x3FF) << 21));
+  return ((w | (rd << 7) | op) >>> 0);
+}
+function rvRange(v, lo, hi, what, line) {
+  if (v < lo || v > hi) throw { line: line, msg: what + " " + v + " out of range [" + lo + "," + hi + "]" };
+}
+function rvAligned(v, what, line) {
+  if (v & 1) throw { line: line, msg: what + " target misaligned (offset " + v + ")" };
+}
+
+function rvExpandPseudo(op, args, ln) {
+  if (op === "nop") return [["addi", ["x0", "x0", "0"]]];
+  if (op === "mv" && args.length === 2) return [["addi", [args[0], args[1], "0"]]];
+  if (op === "ret" && args.length === 0) return [["jalr", ["x0", "0(x1)"]]];
+  if (op === "j" && args.length === 1) return [["jal", ["x0", args[0]]]];
+  if (op === "li" && args.length === 2) {
+    var v = rvParseImm(args[1], ln);
+    if (v >= -2048 && v <= 2047) return [["addi", [args[0], "x0", String(v)]]];
+    var hi = (v + 0x800) >> 12, lo = v - (hi << 12);
+    return [["lui", [args[0], String(hi)]], ["addi", [args[0], args[0], String(lo)]]];
+  }
+  return [[op, args]];
+}
+
+function rvEncode(op, args, addr, labels, line) {
+  var d = RV_OPS[op];
+  if (!d) throw { line: line, msg: "unknown instruction '" + op + "'" };
+  function need(n) { if (args.length !== n) throw { line: line, msg: op + " wants " + n + " operands, got " + args.length }; }
+  switch (d.ty) {
+    case "R": {
+      need(3);
+      return rvEncR(d.f7, rvParseReg(args[2], line), rvParseReg(args[1], line), d.f3, rvParseReg(args[0], line), d.op);
+    }
+    case "I": {
+      need(3);
+      var im = rvParseImm(args[2], line); rvRange(im, -2048, 2047, "immediate", line);
+      return rvEncI(im, rvParseReg(args[1], line), d.f3, rvParseReg(args[0], line), d.op);
+    }
+    case "Is": {
+      need(3);
+      var sh = rvParseImm(args[2], line); rvRange(sh, 0, 31, "shift amount", line);
+      return rvEncR(d.f7, sh, rvParseReg(args[1], line), d.f3, rvParseReg(args[0], line), d.op);
+    }
+    case "L": {
+      need(2);
+      var lm = rvParseMem(args[1], line); rvRange(lm.off, -2048, 2047, "offset", line);
+      return rvEncI(lm.off, lm.rs, d.f3, rvParseReg(args[0], line), d.op);
+    }
+    case "S": {
+      need(2);
+      var sm = rvParseMem(args[1], line); rvRange(sm.off, -2048, 2047, "offset", line);
+      return rvEncS(sm.off, rvParseReg(args[0], line), sm.rs, d.f3, d.op);
+    }
+    case "B": {
+      need(3);
+      var tgt = String(args[2]).toLowerCase();
+      if (!labels.hasOwnProperty(tgt)) throw { line: line, msg: "unknown label '" + args[2] + "'" };
+      var off = labels[tgt] - addr;
+      rvRange(off, -4096, 4094, "branch offset", line); rvAligned(off, "branch", line);
+      return rvEncB(off, rvParseReg(args[1], line), rvParseReg(args[0], line), d.f3, d.op);
+    }
+    case "J": {
+      need(2);
+      var jt = String(args[1]).toLowerCase();
+      if (!labels.hasOwnProperty(jt)) throw { line: line, msg: "unknown label '" + args[1] + "'" };
+      var joff = labels[jt] - addr;
+      rvRange(joff, -1048576, 1048574, "jump offset", line); rvAligned(joff, "jump", line);
+      return rvEncJ(joff, rvParseReg(args[0], line), d.op);
+    }
+    case "Jr": {
+      need(2);
+      var jm = rvParseMem(args[1], line); rvRange(jm.off, -2048, 2047, "offset", line);
+      return rvEncI(jm.off, jm.rs, d.f3, rvParseReg(args[0], line), d.op);
+    }
+    case "U": {
+      need(2);
+      var u = rvParseImm(args[1], line);
+      return rvEncU(u, rvParseReg(args[0], line), d.op);
+    }
+    case "E": {
+      if (args.length) throw { line: line, msg: "ecall takes no operands" };
+      return 0x73;
+    }
+  }
+  throw { line: line, msg: "cannot encode '" + op + "'" };
+}
+
+function rvAssemble(src) {
+  var raw = String(src).split("\n");
+  var items = [];
+  var labels = {};
+  var addr = 0;
+  for (var i = 0; i < raw.length; i++) {
+    var ln = i + 1;
+    var t = raw[i].replace(/#.*$/, "").trim();
+    if (!t) continue;
+    var m = t.match(/^([A-Za-z_][\w.]*)\s*:\s*(.*)$/);
+    var label = null;
+    if (m) { label = m[1].toLowerCase(); t = m[2].trim(); }
+    if (label) {
+      if (labels.hasOwnProperty(label)) throw { line: ln, msg: "duplicate label '" + label + "'" };
+      labels[label] = addr;
+    }
+    if (!t) continue;
+    if (t.charAt(0) === ".") {
+      var dm = t.match(/^\.(\w+)\s*(.*)$/);
+      if (dm && dm[1] === "word") {
+        var vals = dm[2].split(",").map(function (s) { return rvParseImm(s, ln); });
+        if (!vals.length) throw { line: ln, msg: ".word needs values" };
+        items.push({ line: ln, op: ".word", args: vals, addr: addr, src: raw[i].trim() });
+        addr += 4 * vals.length;
+      } else throw { line: ln, msg: "unsupported directive '" + t + "'" };
+      continue;
+    }
+    var sp = t.search(/\s/);
+    var op = (sp < 0 ? t : t.slice(0, sp)).toLowerCase();
+    var rest = sp < 0 ? "" : t.slice(sp).trim();
+    var args = rest ? rest.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s.length; }) : [];
+    var expanded = rvExpandPseudo(op, args, ln);
+    for (var k = 0; k < expanded.length; k++) {
+      items.push({ line: ln, op: expanded[k][0], args: expanded[k][1], addr: addr, src: raw[i].trim() });
+      addr += 4;
+    }
+  }
+  var words = [], listing = [];
+  items.forEach(function (it) {
+    if (it.op === ".word") {
+      it.args.forEach(function (v, j) {
+        words.push(v >>> 0);
+        listing.push({ addr: it.addr + j * 4, word: v >>> 0, src: it.src, line: it.line });
+      });
+    } else {
+      var w = rvEncode(it.op, it.args, it.addr, labels, it.line);
+      words.push(w);
+      listing.push({ addr: it.addr, word: w, src: it.src, line: it.line });
+    }
+  });
+  return { words: words, labels: labels, listing: listing };
+}
+
+/* CPU */
+function rvCpu(words) {
+  var MEMSZ = 4096;
+  var mem = new Uint8Array(MEMSZ);
+  for (var i = 0; i < words.length; i++) {
+    if (i * 4 + 4 > MEMSZ) throw { trap: "program too big for 4K memory" };
+    var w = words[i] >>> 0;
+    mem[i * 4] = w & 0xFF; mem[i * 4 + 1] = (w >>> 8) & 0xFF;
+    mem[i * 4 + 2] = (w >>> 16) & 0xFF; mem[i * 4 + 3] = (w >>> 24) & 0xFF;
+  }
+  var R = new Array(32);
+  for (var r = 0; r < 32; r++) R[r] = 0;
+  R[2] = 0x1000;
+  return { mem: mem, memsz: MEMSZ, R: R, pc: 0, halted: false, steps: 0, out: [], lastWord: 0 };
+}
+function rvLoadW(cpu, a) {
+  if (a & 3) throw { trap: "misaligned load at 0x" + (a >>> 0).toString(16) };
+  if (a + 4 > cpu.memsz || a < 0) throw { trap: "load out of bounds at 0x" + (a >>> 0).toString(16) };
+  return (cpu.mem[a] | (cpu.mem[a + 1] << 8) | (cpu.mem[a + 2] << 16) | (cpu.mem[a + 3] << 24)) | 0;
+}
+function rvStep(cpu) {
+  if (cpu.halted) return "halt";
+  var pc = cpu.pc >>> 0;
+  if (pc & 3) throw { trap: "misaligned PC 0x" + pc.toString(16) };
+  if (pc + 4 > cpu.memsz) throw { trap: "PC ran off the end of memory" };
+  var w = (cpu.mem[pc] | (cpu.mem[pc + 1] << 8) | (cpu.mem[pc + 2] << 16) | (cpu.mem[pc + 3] << 24)) >>> 0;
+  cpu.lastWord = w;
+  var op = w & 0x7F, rd = (w >>> 7) & 31, f3 = (w >>> 12) & 7;
+  var rs1 = (w >>> 15) & 31, rs2 = (w >>> 20) & 31, f7 = (w >>> 25) & 0x7F;
+  var R = cpu.R;
+  var npc = (pc + 4) >>> 0;
+  function sx(v, bits) { return (v << (32 - bits)) >> (32 - bits); }
+  function wr(d, v) { if (d) R[d] = v | 0; }
+  function chkA(a, n) { if (a + n > cpu.memsz || a < 0) throw { trap: "memory access out of bounds at 0x" + (a >>> 0).toString(16) }; }
+  switch (op) {
+    case 0x33: {
+      var a = R[rs1] | 0, b = R[rs2] | 0;
+      if (f7 === 0) {
+        if (f3 === 0) wr(rd, a + b);
+        else if (f3 === 1) wr(rd, a << (b & 31));
+        else if (f3 === 2) wr(rd, a < b ? 1 : 0);
+        else if (f3 === 3) wr(rd, (a >>> 0) < (b >>> 0) ? 1 : 0);
+        else if (f3 === 4) wr(rd, a ^ b);
+        else if (f3 === 5) wr(rd, a >>> (b & 31));
+        else if (f3 === 6) wr(rd, a | b);
+        else if (f3 === 7) wr(rd, a & b);
+        else throw { trap: "bad funct3" };
+      } else if (f7 === 32) {
+        if (f3 === 0) wr(rd, a - b);
+        else if (f3 === 5) wr(rd, a >> (b & 31));
+        else throw { trap: "bad funct7/funct3" };
+      } else throw { trap: "bad funct7" };
+      break;
+    }
+    case 0x13: {
+      var imm = sx(w >>> 20, 12), s1 = R[rs1] | 0;
+      if (f3 === 0) wr(rd, s1 + imm);
+      else if (f3 === 1) wr(rd, s1 << (rs2 & 31));
+      else if (f3 === 2) wr(rd, s1 < imm ? 1 : 0);
+      else if (f3 === 3) wr(rd, (s1 >>> 0) < (imm >>> 0) ? 1 : 0);
+      else if (f3 === 4) wr(rd, s1 ^ imm);
+      else if (f3 === 6) wr(rd, s1 | imm);
+      else if (f3 === 7) wr(rd, s1 & imm);
+      else if (f3 === 5) {
+        if (f7 === 0) wr(rd, s1 >>> (rs2 & 31));
+        else if (f7 === 32) wr(rd, s1 >> (rs2 & 31));
+        else throw { trap: "bad shift funct7" };
+      } else throw { trap: "bad funct3" };
+      break;
+    }
+    case 0x03: {
+      var lo = sx(w >>> 20, 12), ad = (R[rs1] + lo) | 0, au = ad >>> 0;
+      if (f3 === 2) { if (au & 3) throw { trap: "misaligned lw" }; chkA(au, 4); wr(rd, rvLoadW(cpu, au)); }
+      else if (f3 === 1) { if (au & 1) throw { trap: "misaligned lh" }; chkA(au, 2); wr(rd, sx(cpu.mem[au] | (cpu.mem[au + 1] << 8), 16)); }
+      else if (f3 === 0) { chkA(au, 1); wr(rd, sx(cpu.mem[au], 8)); }
+      else if (f3 === 5) { if (au & 1) throw { trap: "misaligned lhu" }; chkA(au, 2); wr(rd, cpu.mem[au] | (cpu.mem[au + 1] << 8)); }
+      else if (f3 === 4) { chkA(au, 1); wr(rd, cpu.mem[au]); }
+      else throw { trap: "bad load funct3" };
+      break;
+    }
+    case 0x23: {
+      var so = sx(((w >>> 25) << 5) | ((w >>> 7) & 31), 12), sa = (R[rs1] + so) | 0, su = sa >>> 0, sv = R[rs2] | 0;
+      if (f3 === 2) { if (su & 3) throw { trap: "misaligned sw" }; chkA(su, 4); cpu.mem[su] = sv & 0xFF; cpu.mem[su + 1] = (sv >>> 8) & 0xFF; cpu.mem[su + 2] = (sv >>> 16) & 0xFF; cpu.mem[su + 3] = (sv >>> 24) & 0xFF; }
+      else if (f3 === 1) { if (su & 1) throw { trap: "misaligned sh" }; chkA(su, 2); cpu.mem[su] = sv & 0xFF; cpu.mem[su + 1] = (sv >>> 8) & 0xFF; }
+      else if (f3 === 0) { chkA(su, 1); cpu.mem[su] = sv & 0xFF; }
+      else throw { trap: "bad store funct3" };
+      break;
+    }
+    case 0x63: {
+      var bo = sx((((w >>> 31) & 1) << 12) | (((w >>> 7) & 1) << 11) | (((w >>> 25) & 0x3F) << 5) | (((w >>> 8) & 0xF) << 1), 13);
+      var x = R[rs1] | 0, y = R[rs2] | 0, take = false;
+      if (f3 === 0) take = x === y;
+      else if (f3 === 1) take = x !== y;
+      else if (f3 === 4) take = x < y;
+      else if (f3 === 5) take = x >= y;
+      else if (f3 === 6) take = (x >>> 0) < (y >>> 0);
+      else if (f3 === 7) take = (x >>> 0) >= (y >>> 0);
+      else throw { trap: "bad branch funct3" };
+      if (take) npc = (pc + bo) >>> 0;
+      break;
+    }
+    case 0x6F: {
+      var jo = sx((((w >>> 31) & 1) << 20) | (((w >>> 12) & 0xFF) << 12) | (((w >>> 20) & 1) << 11) | (((w >>> 21) & 0x3FF) << 1), 21);
+      wr(rd, pc + 4); npc = (pc + jo) >>> 0;
+      break;
+    }
+    case 0x67: {
+      var ji = sx(w >>> 20, 12);
+      wr(rd, pc + 4); npc = ((R[rs1] + ji) & ~1) >>> 0;
+      break;
+    }
+    case 0x37: wr(rd, w & 0xFFFFF000); break;
+    case 0x17: wr(rd, (pc + (w & 0xFFFFF000)) | 0); break;
+    case 0x73: {
+      if (w !== 0x73) throw { trap: "bad SYSTEM encoding" };
+      var svc = R[17] | 0;
+      if (svc === 10) { cpu.halted = true; cpu.pc = npc; R[0] = 0; cpu.steps++; return "halt"; }
+      if (svc === 1) { cpu.out.push(R[10] | 0); }
+      else throw { trap: "unknown ecall service " + svc + " (use 1=print, 10=halt)" };
+      break;
+    }
+    default: throw { trap: "illegal instruction 0x" + w.toString(16) + " at PC 0x" + pc.toString(16) };
+  }
+  R[0] = 0;
+  cpu.pc = npc;
+  cpu.steps++;
+  return "ok";
+}
+function rvRun(cpu, limit) {
+  limit = limit || 200000;
+  while (!cpu.halted) {
+    if (cpu.steps >= limit) throw { trap: "runaway program: " + limit + " steps with no halt (check your loop)" };
+    rvStep(cpu);
+  }
+  return cpu;
+}
+
+/* Disassembler for the bench readout */
+function rvDis(w) {
+  w = w >>> 0;
+  var op = w & 0x7F, rd = (w >>> 7) & 31, f3 = (w >>> 12) & 7;
+  var rs1 = (w >>> 15) & 31, rs2 = (w >>> 20) & 31, f7 = (w >>> 25) & 0x7F;
+  function sx(v, bits) { return (v << (32 - bits)) >> (32 - bits); }
+  function rn(r) { return "x" + r; }
+  var Rtab = { "0x33": null };
+  if (op === 0x33) {
+    var nm = { "0,0": "add", "0,32": "sub", "1,0": "sll", "2,0": "slt", "3,0": "sltu", "4,0": "xor", "5,0": "srl", "5,32": "sra", "6,0": "or", "7,0": "and" }[f3 + "," + f7];
+    return nm ? nm + " " + rn(rd) + "," + rn(rs1) + "," + rn(rs2) : ".word 0x" + w.toString(16);
+  }
+  if (op === 0x13) {
+    var im = sx(w >>> 20, 12);
+    if (f3 === 1) return "slli " + rn(rd) + "," + rn(rs1) + "," + rs2;
+    if (f3 === 5) return (f7 === 32 ? "srai " : "srli ") + rn(rd) + "," + rn(rs1) + "," + rs2;
+    var nm2 = { 0: "addi", 2: "slti", 3: "sltiu", 4: "xori", 6: "ori", 7: "andi" }[f3];
+    return nm2 ? nm2 + " " + rn(rd) + "," + rn(rs1) + "," + im : ".word 0x" + w.toString(16);
+  }
+  if (op === 0x03) {
+    var nm3 = { 0: "lb", 1: "lh", 2: "lw", 4: "lbu", 5: "lhu" }[f3];
+    return nm3 ? nm3 + " " + rn(rd) + "," + sx(w >>> 20, 12) + "(" + rn(rs1) + ")" : ".word 0x" + w.toString(16);
+  }
+  if (op === 0x23) {
+    var nm4 = { 0: "sb", 1: "sh", 2: "sw" }[f3];
+    return nm4 ? nm4 + " " + rn(rs2) + "," + sx(((w >>> 25) << 5) | ((w >>> 7) & 31), 12) + "(" + rn(rs1) + ")" : ".word 0x" + w.toString(16);
+  }
+  if (op === 0x63) {
+    var nm5 = { 0: "beq", 1: "bne", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu" }[f3];
+    var bo = sx((((w >>> 31) & 1) << 12) | (((w >>> 7) & 1) << 11) | (((w >>> 25) & 0x3F) << 5) | (((w >>> 8) & 0xF) << 1), 13);
+    return nm5 ? nm5 + " " + rn(rs1) + "," + rn(rs2) + ",pc+" + bo : ".word 0x" + w.toString(16);
+  }
+  if (op === 0x6F) {
+    var jo = sx((((w >>> 31) & 1) << 20) | (((w >>> 12) & 0xFF) << 12) | (((w >>> 20) & 1) << 11) | (((w >>> 21) & 0x3FF) << 1), 21);
+    return "jal " + rn(rd) + ",pc+" + jo;
+  }
+  if (op === 0x67) return "jalr " + rn(rd) + "," + sx(w >>> 20, 12) + "(" + rn(rs1) + ")";
+  if (op === 0x37) return "lui " + rn(rd) + ",0x" + ((w >>> 12) & 0xFFFFF).toString(16);
+  if (op === 0x17) return "auipc " + rn(rd) + ",0x" + ((w >>> 12) & 0xFFFFF).toString(16);
+  if (w === 0x73) return "ecall";
+  return ".word 0x" + w.toString(16);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { rvAssemble: rvAssemble, rvCpu: rvCpu, rvStep: rvStep, rvRun: rvRun, rvDis: rvDis, RV_REGNAMES: RV_REGNAMES, rvLoadW: rvLoadW };
+}
+/* ================= THE SILICON ANVIL =================
+   A real RV32I test rig: write assembly, assemble it to machine code,
+   step a genuine 32-bit core, pass trials, earn certificates. */
+
+var RV_CHALLENGES = [
+  { id: "firstlight", name: "First Light",
+    goal: "Put the value 42 into a0, then halt the core with ecall (a7 = 10).",
+    hint: "li a0, 42  /  li a7, 10  /  ecall",
+    check: function (cpu) { return (cpu.R[10] | 0) === 42; } },
+  { id: "counter", name: "The Counter",
+    goal: "Print 1, 2, 3, 4, 5 through the UART (ecall with a7 = 1, value in a0), then halt.",
+    hint: "loop with beq, mv a0, t0, ecall, addi t0, t0, 1",
+    check: function (cpu) {
+      var o = cpu.out;
+      return o.length === 5 && o[0] === 1 && o[1] === 2 && o[2] === 3 && o[3] === 4 && o[4] === 5;
+    } },
+  { id: "courier", name: "Memory Courier",
+    goal: "Store the word 0xCAFE at byte address 0x100, then halt.",
+    hint: "li t0, 0xCAFE  /  li t1, 0x100  /  sw t0, 0(t1)",
+    check: function (cpu) { return (rvLoadW(cpu, 0x100) >>> 0) === 0xCAFE; } }
+];
+
+var RV_EXAMPLES = {
+  fib: "# Fibonacci(10) into a0, the hard way. Watch t2 carry the sum.\n" +
+    "addi a0, x0, 0\naddi a1, x0, 1\naddi t0, x0, 10\naddi t1, x0, 1\n" +
+    "loop:\nbeq t1, t0, done\nadd t2, a0, a1\nmv a0, a1\nmv a1, t2\naddi t1, t1, 1\nj loop\n" +
+    "done:\nli a7, 10\necall",
+  counter: "# Count 1..5 out the UART. a7=1 prints a0, a7=10 halts.\n" +
+    "addi t0, x0, 1\naddi t1, x0, 6\nloop:\nbeq t0, t1, done\nmv a0, t0\nli a7, 1\necall\naddi t0, t0, 1\nj loop\ndone:\nli a7, 10\necall",
+  blank: "# THE SILICON ANVIL: a real RV32I core on the bench.\n" +
+    "# Real instructions: addi add sub and or xor sll srl sra slt sltu,\n" +
+    "# lw lh lb lbu lhu sw sh sb, beq bne blt bge bltu bgeu,\n" +
+    "# jal jalr lui auipc ecall. Pseudos: li mv nop j ret. Comments start with #.\n" +
+    "# Registers: x0..x31 or ABI names (a0..a7, t0..t6, s0..s11, ra, sp).\n" +
+    "# ecall services: a7=1 prints a0 to the UART, a7=10 halts the core.\n# Memory: 4 KB, sp starts at 0x1000.\n\n" +
+    "li a0, 42\nli a7, 10\necall"
+};
+
+var rvs = null;
+
+function rvHex(n, pad) {
+  var s = (n >>> 0).toString(16);
+  while (s.length < pad) s = "0" + s;
+  return s;
+}
+
+function rvBuild() {
+  var box = document.querySelector(".dossier .actions");
+  if (!box || $("rvAnvilBtn")) return;
+
+  var css = [
+    ".rv-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".rv-overlay.open{display:flex;}",
+    ".rv-panel{width:min(860px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+    ".rv-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".rv-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".rv-trials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".rv-trial{border:1px solid var(--line);padding:8px 10px;background:var(--panel-2);cursor:pointer;min-width:0;}",
+    ".rv-trial.sel{border-color:var(--acid);}",
+    ".rv-trial h5{margin:0 0 4px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+    ".rv-trial p{margin:0 0 4px;font-size:11px;color:var(--ink);line-height:1.5;}",
+    ".rv-trial p.hint{font-family:monospace;font-size:10px;color:#7c8d89;}",
+    ".rv-ed{width:100%;min-height:190px;background:#060b0c;border:1px solid var(--line);color:var(--ink);font-family:monospace;font-size:12px;line-height:1.55;padding:10px;box-sizing:border-box;resize:vertical;}",
+    ".rv-btns{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0;}",
+    ".rv-btns button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);}",
+    ".rv-btns button:disabled{opacity:.35;cursor:default;}",
+    "#rvRun{border-color:var(--acid);color:var(--acid);}",
+    ".rv-btns2{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 10px;}",
+    ".rv-btns2 button{min-height:40px;padding:8px 6px;font-family:monospace;font-size:11px;cursor:pointer;background:var(--panel-2);border:1px solid var(--line);color:var(--cyan);}",
+    ".rv-status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".rv-stat{border:1px solid var(--line);padding:6px 8px;background:var(--panel-2);min-width:0;}",
+    ".rv-stat h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".rv-stat p{margin:0;font-family:monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+    ".rv-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}",
+    ".rv-box{border:1px solid var(--line);background:#060b0c;padding:8px;min-width:0;}",
+    ".rv-box h6{margin:0 0 6px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".rv-regs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;}",
+    ".rv-reg{border:1px solid var(--line);padding:4px 6px;font-family:monospace;font-size:10px;color:var(--ink);}",
+    ".rv-reg b{color:#7c8d89;font-weight:400;margin-right:4px;}",
+    ".rv-reg.chg{border-color:var(--acid);color:var(--acid);}",
+    ".rv-reg.chg b{color:var(--acid);}",
+    ".rv-mem{font-family:monospace;font-size:10px;color:var(--ink);line-height:1.7;white-space:pre;overflow-x:auto;}",
+    ".rv-mem .ad{color:#7c8d89;}",
+    ".rv-uart{font-family:monospace;font-size:12px;color:var(--cyan);min-height:34px;white-space:pre-wrap;}",
+    ".rv-listing{font-family:monospace;font-size:10px;color:var(--ink);line-height:1.7;max-height:150px;overflow-y:auto;white-space:pre;}",
+    ".rv-listing .ad{color:#7c8d89;}",
+    ".rv-listing .hx{color:var(--orange);}",
+    ".rv-result{margin-top:10px;padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;}",
+    ".rv-result.win{border-color:var(--acid);color:var(--acid);}",
+    ".rv-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".rv-foot{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}",
+    ".rv-foot .secondary{flex:1;min-height:44px;}",
+    "@media (max-width:640px){.rv-trials{grid-template-columns:1fr;}.rv-btns{grid-template-columns:repeat(2,minmax(0,1fr));}.rv-status{grid-template-columns:repeat(2,minmax(0,1fr));}.rv-cols{grid-template-columns:1fr;}.rv-regs{grid-template-columns:repeat(4,minmax(0,1fr));}}"
+  ].join("\n");
+  var st = document.createElement("style");
+  st.textContent = css;
+  document.head.appendChild(st);
+
+  var b = el("button", "secondary", "Fire the Silicon Anvil");
+  b.id = "rvAnvilBtn";
+  b.addEventListener("click", function () { $("rvAnvilOverlay").classList.add("open"); });
+  box.appendChild(b);
+
+  var trialsHtml = RV_CHALLENGES.map(function (c, i) {
+    return '<div class="rv-trial' + (i === 0 ? " sel" : "") + '" data-i="' + i + '" role="button" tabindex="0">' +
+      "<h5>Trial " + (i + 1) + ": " + c.name + "</h5><p>" + c.goal + "</p>" +
+      '<p class="hint">' + c.hint + "</p></div>";
+  }).join("");
+
+  var regsHtml = "";
+  for (var r = 0; r < 32; r++) {
+    regsHtml += '<div class="rv-reg" id="rvReg' + r + '"><b>' + RV_REGNAMES[r] + "</b><span>0</span></div>";
+  }
+
+  var ov = el("div", "rv-overlay");
+  ov.id = "rvAnvilOverlay";
+  ov.innerHTML =
+    '<div class="rv-panel" role="dialog" aria-label="The Silicon Anvil RISC-V test rig">' +
+    "<h3>The Silicon Anvil</h3>" +
+    '<p class="rv-sub">A real RV32I core bolted to the bench. Write assembly, assemble it to machine code, step the silicon, pass a trial. Traps are free, certificates are earned.</p>' +
+    '<div class="rv-trials">' + trialsHtml + "</div>" +
+    '<textarea class="rv-ed" id="rvEd" spellcheck="false"></textarea>' +
+    '<div class="rv-btns">' +
+    '<button id="rvAsm">Assemble</button>' +
+    '<button id="rvRun">Run</button>' +
+    '<button id="rvStep">Step</button>' +
+    '<button id="rvStop" disabled>Stop</button>' +
+    '<button id="rvReset">Reset</button>' +
+    "</div>" +
+    '<div class="rv-btns2">' +
+    '<button id="rvExFib">Load: Fibonacci</button>' +
+    '<button id="rvExCnt">Load: Counter</button>' +
+    '<button id="rvExBlk">Load: Template</button>' +
+    "</div>" +
+    '<div class="rv-status">' +
+    '<div class="rv-stat"><h6>PC</h6><p id="rvPc">0x00000000</p></div>' +
+    '<div class="rv-stat"><h6>Next instruction</h6><p id="rvNext">--</p></div>' +
+    '<div class="rv-stat"><h6>Steps</h6><p id="rvSteps">0</p></div>' +
+    '<div class="rv-stat"><h6>State</h6><p id="rvState">no program</p></div>' +
+    "</div>" +
+    '<div class="rv-cols">' +
+    '<div class="rv-box"><h6>Registers (32, live)</h6><div class="rv-regs">' + regsHtml + "</div></div>" +
+    '<div class="rv-box"><h6>UART (ecall prints)</h6><div class="rv-uart" id="rvUart">(silent)</div>' +
+    '<h6 style="margin-top:8px;">Memory</h6><div class="rv-mem" id="rvMem">--</div></div>' +
+    "</div>" +
+    '<div class="rv-box"><h6>Machine code listing</h6><div class="rv-listing" id="rvListing">Assemble something first.</div></div>' +
+    '<div class="rv-result" id="rvResult"></div>' +
+    '<div class="rv-foot">' +
+    '<button class="secondary" id="rvHexBtn" disabled>Download HEX</button>' +
+    '<button class="secondary" id="rvCertBtn" disabled>Download certificate</button>' +
+    '<button class="secondary" id="rvClose">Close</button>' +
+    "</div>" +
+    "</div>";
+  document.body.appendChild(ov);
+
+  rvs = { asm: null, cpu: null, running: false, timer: 0, challenge: 0, cert: null, prev: null };
+
+  $("rvEd").value = RV_EXAMPLES.blank;
+
+  var trials = ov.querySelectorAll(".rv-trial");
+  for (var ti = 0; ti < trials.length; ti++) {
+    (function (t, i) {
+      function sel() {
+        rvs.challenge = i;
+        for (var k = 0; k < trials.length; k++) trials[k].classList.remove("sel");
+        t.classList.add("sel");
+        toast("Trial selected: " + RV_CHALLENGES[i].name);
+      }
+      t.addEventListener("click", sel);
+      t.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sel(); } });
+    })(trials[ti], ti);
+  }
+
+  $("rvAsm").addEventListener("click", rvAssembleUI);
+  $("rvRun").addEventListener("click", rvRunUI);
+  $("rvStep").addEventListener("click", rvStepUI);
+  $("rvStop").addEventListener("click", rvStopUI);
+  $("rvReset").addEventListener("click", rvResetUI);
+  $("rvExFib").addEventListener("click", function () { $("rvEd").value = RV_EXAMPLES.fib; toast("Fibonacci example loaded"); });
+  $("rvExCnt").addEventListener("click", function () { $("rvEd").value = RV_EXAMPLES.counter; toast("Counter example loaded"); });
+  $("rvExBlk").addEventListener("click", function () { $("rvEd").value = RV_EXAMPLES.blank; toast("Blank template loaded"); });
+  $("rvHexBtn").addEventListener("click", rvHexDownload);
+  $("rvCertBtn").addEventListener("click", rvCertificate);
+  $("rvClose").addEventListener("click", function () { rvStopUI(); ov.classList.remove("open"); });
+  ov.addEventListener("click", function (e) { if (e.target === ov) { rvStopUI(); ov.classList.remove("open"); } });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && ov.classList.contains("open")) { rvStopUI(); ov.classList.remove("open"); }
+  });
+
+  rvRefresh();
+}
+
+function rvSetResult(msg, cls) {
+  var r = $("rvResult");
+  r.textContent = msg;
+  r.className = "rv-result" + (cls ? " " + cls : "");
+}
+
+function rvAssembleUI() {
+  rvStopUI();
+  var src = $("rvEd").value;
+  try {
+    var a = rvAssemble(src);
+    if (!a.words.length) throw { line: 0, msg: "nothing to assemble" };
+    rvs.asm = a;
+    rvs.cpu = rvCpu(a.words);
+    rvs.prev = null;
+    rvs.cert = null;
+    $("rvCertBtn").disabled = true;
+    $("rvHexBtn").disabled = false;
+    var lh = a.listing.map(function (l) {
+      return '<span class="ad">0x' + rvHex(l.addr, 8) + "</span>  " +
+        '<span class="hx">' + rvHex(l.word, 8) + "</span>  " +
+        rvDis(l.word) + "   <span class='ad'>; " + l.src.replace(/</g, "&lt;") + "</span>";
+    }).join("\n");
+    $("rvListing").innerHTML = lh;
+    rvSetResult("Assembled " + a.words.length + " words. Core reset, sp = 0x1000. Run it, or step it like you mean it.", "");
+    rvRefresh();
+    toast("Assembled " + a.words.length + " words");
+  } catch (e) {
+    rvSetResult("Assembly failed" + (e.line ? " at line " + e.line : "") + ": " + (e.msg || e.trap || "error"), "fail");
+  }
+}
+
+function rvStopUI() {
+  rvs.running = false;
+  if (rvs.timer) { clearTimeout(rvs.timer); rvs.timer = 0; }
+  var rs = $("rvRun"), sp = $("rvStop");
+  if (rs) rs.disabled = !rvs.cpu;
+  if (sp) sp.disabled = true;
+}
+
+function rvStepOnce() {
+  try {
+    var st = rvStep(rvs.cpu);
+    return st;
+  } catch (e) {
+    rvSetResult("TRAP: " + (e.trap || e.msg || "unknown") + ". The core is halted in shame.", "fail");
+    rvs.cpu.halted = true;
+    rvStopUI();
+    rvRefresh();
+    return "trap";
+  }
+}
+
+function rvStepUI() {
+  if (!rvs.cpu || rvs.running) return;
+  var st = rvStepOnce();
+  rvRefresh();
+  if (st === "halt") rvOnHalt();
+}
+
+function rvRunUI() {
+  if (!rvs.cpu || rvs.running) return;
+  rvSetResult("Running...", "");
+  rvs.running = true;
+  $("rvRun").disabled = true;
+  $("rvStop").disabled = false;
+  function chunk() {
+    if (!rvs.running) return;
+    var n = 0, done = false, trapped = null;
+    try {
+      while (n < 4000 && !rvs.cpu.halted) { rvStep(rvs.cpu); n++; }
+      done = rvs.cpu.halted;
+    } catch (e) { trapped = e.trap || e.msg || "unknown"; rvs.cpu.halted = true; }
+    rvRefresh();
+    if (trapped) {
+      rvSetResult("TRAP: " + trapped + ". The core is halted in shame.", "fail");
+      rvStopUI();
+      return;
+    }
+    if (done) { rvStopUI(); rvOnHalt(); return; }
+    rvs.timer = setTimeout(chunk, 16);
+  }
+  chunk();
+}
+
+function rvResetUI() {
+  rvStopUI();
+  if (!rvs.asm) return;
+  rvs.cpu = rvCpu(rvs.asm.words);
+  rvs.prev = null;
+  rvs.cert = null;
+  $("rvCertBtn").disabled = true;
+  rvSetResult("Core reset. Same program, fresh silicon.", "");
+  rvRefresh();
+}
+
+function rvOnHalt() {
+  var c = RV_CHALLENGES[rvs.challenge];
+  var pass = false;
+  try { pass = c.check(rvs.cpu); } catch (e) { pass = false; }
+  if (pass) {
+    rvs.cert = { trial: c.name, steps: rvs.cpu.steps, date: new Date().toISOString().slice(0, 10) };
+    $("rvCertBtn").disabled = false;
+    rvSetResult("TRIAL PASSED: " + c.name + " in " + rvs.cpu.steps + " steps. The anvil rings true. Certificate unlocked.", "win");
+    toast("Trial passed: " + c.name);
+  } else {
+    rvSetResult("Halted after " + rvs.cpu.steps + " steps, but trial '" + c.name + "' not satisfied. Check the goal and try again.", "");
+  }
+}
+
+function rvRefresh() {
+  if (!rvs.cpu) {
+    $("rvPc").textContent = "0x00000000";
+    $("rvNext").textContent = "--";
+    $("rvSteps").textContent = "0";
+    $("rvState").textContent = "no program";
+    $("rvUart").textContent = "(silent)";
+    $("rvMem").textContent = "--";
+    return;
+  }
+  var cpu = rvs.cpu;
+  $("rvPc").textContent = "0x" + rvHex(cpu.pc, 8);
+  $("rvSteps").textContent = String(cpu.steps);
+  $("rvState").textContent = cpu.halted ? "halted" : (rvs.running ? "running" : "ready");
+  var nxt = "--";
+  if (cpu.pc + 4 <= cpu.memsz) {
+    nxt = rvDis(cpu.mem[cpu.pc] | (cpu.mem[cpu.pc + 1] << 8) | (cpu.mem[cpu.pc + 2] << 16) | (cpu.mem[cpu.pc + 3] << 24));
+  }
+  $("rvNext").textContent = nxt;
+  for (var r = 0; r < 32; r++) {
+    var cell = $("rvReg" + r);
+    var v = cpu.R[r] | 0;
+    var changed = rvs.prev && rvs.prev[r] !== v;
+    cell.className = "rv-reg" + (changed ? " chg" : "");
+    cell.querySelector("span").textContent = "0x" + rvHex(v, 8);
+    cell.title = RV_REGNAMES[r] + " = " + v + " (signed)";
+  }
+  rvs.prev = cpu.R.slice();
+  $("rvUart").textContent = cpu.out.length ? cpu.out.join(" ") : "(silent)";
+  var mh = "";
+  function wordAt(a) { return (cpu.mem[a] | (cpu.mem[a + 1] << 8) | (cpu.mem[a + 2] << 16) | (cpu.mem[a + 3] << 24)) >>> 0; }
+  for (var m = 0; m < 8; m++) {
+    var a = m * 4;
+    mh += '<span class="ad">0x' + rvHex(a, 4) + "</span> " + rvHex(wordAt(a), 8) + (m === 3 ? "\n" : "  ");
+  }
+  mh += "\n" + '<span class="ad">0x0100</span> ' + rvHex(wordAt(0x100), 8) + "   " + '<span class="ad">0x0FFC</span> ' + rvHex(wordAt(0xFFC), 8);
+  $("rvMem").innerHTML = mh;
+  $("rvRun").disabled = cpu.halted || rvs.running;
+}
+
+function rvHexDownload() {
+  if (!rvs.asm) return;
+  var txt = rvs.asm.listing.map(function (l) {
+    return "0x" + rvHex(l.addr, 8) + "  " + rvHex(l.word, 8) + "  " + rvDis(l.word);
+  }).join("\n");
+  var blob = new Blob(["# Silicon Anvil machine code\n" + txt + "\n"], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "anvil-program.hex";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast("HEX listing downloaded");
+}
+
+function rvCertificate() {
+  if (!rvs.cert) return;
+  var c = rvs.cert;
+  var v = (typeof currentInvention === "function") ? currentInvention() : null;
+  var nm = v ? v.name : "unnamed prototype";
+  var code = v ? v.code : "n/a";
+  var txt =
+    "SILICON ANVIL TRIAL CERTIFICATE\n" +
+    "Garage Inventions RV32I Test Rig\n" +
+    "================================\n" +
+    "Invention : " + nm + " (" + code + ")\n" +
+    "Trial     : " + c.trial + "\n" +
+    "Date      : " + c.date + "\n" +
+    "Result    : TRIAL PASSED, CORE HALTED CLEAN\n" +
+    "Steps     : " + c.steps + "\n" +
+    "\nCertified by the bench. The silicon does not lie, it just traps.\n";
+  var blob = new Blob([txt], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "anvil-trial-certificate.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast("Trial certificate downloaded");
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", rvBuild);
+} else {
+  rvBuild();
+}
+
 })();
