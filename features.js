@@ -8844,3 +8844,570 @@ function gyScoreLift(st) {
   }
 
 })();
+/* ============================================================
+   THE REFLOW OVEN
+   A conveyor reflow oven bench: dial in five zone temps and the
+   belt speed, run a real lumped-capacitance thermal sim, and grade
+   the measured profile against a lead-free (SAC305) process window.
+   Three boards, five checks each, one downloadable profile card.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var rf$ = function (id) { return document.getElementById(id); };
+  function rfToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = rf$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function rfEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function rfEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  var RF_CSS = [
+    ".rf-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".rf-overlay.open{display:flex;}",
+    ".rf-panel{width:min(940px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--orange);padding:16px;}",
+    ".rf-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".rf-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".rf-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}",
+    ".rf-tabs button{min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:#72827f;}",
+    ".rf-tabs button.on{border-color:var(--orange);color:var(--orange);}",
+    ".rf-tabs button.done{border-color:var(--cyan);color:var(--cyan);}",
+    ".rf-blurb{font-size:12px;color:#7c8d89;margin:0 0 12px;line-height:1.6;}",
+    ".rf-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}",
+    ".rf-card{border:1px solid var(--line);background:var(--panel-2);padding:12px;}",
+    ".rf-card h5{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);font-weight:600;}",
+    ".rf-row{margin-bottom:8px;}",
+    ".rf-row label{display:flex;justify-content:space-between;font-size:11px;color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px;}",
+    ".rf-row label span{font-family:monospace;color:var(--ink);}",
+    ".rf-row input[type=range]{width:100%;min-height:44px;accent-color:var(--orange);}",
+    ".rf-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:12px;}",
+    ".rf-stage canvas{display:block;width:100%;height:320px;}",
+    ".rf-read{font-family:monospace;font-size:12px;color:var(--cyan);margin:0 0 10px;min-height:18px;}",
+    ".rf-result{padding:10px 12px;font-size:12px;font-family:monospace;border:1px solid var(--line);line-height:1.8;margin-bottom:10px;}",
+    ".rf-result .ok{color:var(--acid);}",
+    ".rf-result .bad{color:#ff8ba0;}",
+    ".rf-result .note{color:#7c8d89;}",
+    ".rf-result.win{border-color:var(--acid);}",
+    ".rf-result.fail{border-color:#ff4668;}",
+    ".rf-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".rf-foot button{min-height:44px;padding:10px 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;}",
+    ".rf-foot .go{background:var(--orange);border:1px solid var(--orange);color:#140a02;flex:2;}",
+    ".rf-foot .go:disabled{opacity:.35;cursor:default;}",
+    ".rf-foot .ghost{background:#0a1416;border:1px solid var(--line);color:#72827f;flex:1;}",
+    ".rf-foot .ghost:disabled{opacity:.35;cursor:default;}",
+    "@media (max-width:640px){.rf-grid{grid-template-columns:1fr;}}"
+  ].join("\n");
+
+  /* ---------- process model ---------- */
+  var RF_ZONE_LEN = 60, RF_ZONES = 5, RF_TOTAL = RF_ZONE_LEN * RF_ZONES;
+  var RF_ZONE_META = [
+    { name: "Z1 Preheat", min: 100, max: 220, def: 150 },
+    { name: "Z2 Soak", min: 140, max: 240, def: 180 },
+    { name: "Z3 Reflow", min: 200, max: 285, def: 240 },
+    { name: "Z4 Tail", min: 160, max: 280, def: 200 },
+    { name: "Z5 Cool air", min: 25, max: 90, def: 55 }
+  ];
+  var RF_DEF_SPEED = 75, RF_MIN_SPEED = 25, RF_MAX_SPEED = 110;
+
+  var RF_BOARDS = [
+    { name: "Beacon Board", tau: 18, peakLo: 235, peakHi: 247,
+      blurb: "Featherweight LED beacon board, fine-pitch parts. Reacts fast, forgives nothing. Keep the peak under 247C or the LEDs cook." },
+    { name: "Mixed Bag", tau: 30, peakLo: 235, peakHi: 252,
+      blurb: "Two-layer general purpose board. The everyman of the oven. Wants a textbook SAC305 profile." },
+    { name: "Ground Plane Special", tau: 48, peakLo: 235, peakHi: 255,
+      blurb: "Four layers of solid copper pour. A thermal brick with opinions. Slow the belt, it soaks up heat like a sponge." }
+  ];
+
+  function rfSimulate(zones, speed, tau) {
+    var dt = 0.5, v = speed / 60, T = 25, x = 0, t = 0;
+    var tauCool = tau * 1.8;
+    var hist = [];
+    while (x < RF_TOTAL && t < 1500) {
+      var zi = Math.min(4, Math.floor(x / RF_ZONE_LEN));
+      var tc = (zi === 4) ? tauCool : tau;
+      T += (zones[zi] - T) * (dt / tc);
+      x += v * dt; t += dt;
+      hist.push([t, T, x]);
+    }
+    return hist;
+  }
+
+  function rfGrade(hist, board) {
+    var dt = 0.5, peak = 25;
+    var t150 = -1, soak = 0, tal = 0;
+    var t5in = -1, T5in = 0, T5out = 0, t5 = 0;
+    for (var i = 0; i < hist.length; i++) {
+      var T = hist[i][1];
+      if (T > peak) peak = T;
+      if (t150 < 0 && T >= 150) t150 = hist[i][0];
+      if (T >= 150 && T <= 200) soak += dt;
+      if (T > 217) tal += dt;
+    }
+    for (var k = 0; k < hist.length; k++) {
+      if (t5in < 0 && hist[k][2] >= RF_TOTAL - RF_ZONE_LEN) {
+        t5in = hist[k][0]; T5in = hist[k][1];
+      }
+    }
+    var last = hist[hist.length - 1];
+    t5 = last[0] - t5in; T5out = last[1];
+    var cool = t5 > 0 ? (T5in - T5out) / t5 : 0;
+    var ramp = (t150 > 0) ? 125 / t150 : 0;
+    var checks = [];
+    function chk(name, val, lo, hi, unit, failLo, failHi) {
+      var pass = val >= lo && val <= hi;
+      checks.push({ name: name, val: val, lo: lo, hi: hi, unit: unit, pass: pass,
+        note: pass ? "" : (val < lo ? failLo : failHi) });
+    }
+    if (t150 < 0) {
+      checks.push({ name: "Preheat ramp", val: 0, lo: 1, hi: 3, unit: "C/s", pass: false,
+        note: "The board never reached 150C. Raise the early zones or slow the belt." });
+    } else {
+      chk("Preheat ramp", ramp, 1.0, 3.0, "C/s",
+        "Flux gave up and went home before reflow. Speed up the belt or raise zone 1.",
+        "The board took that personally. Thermal shock, cracked ceramics, sadness.");
+    }
+    chk("Soak 150-200C", soak, 60, 120, "s",
+      "Tombstoning risk. Your resistors are doing handstands.",
+      "Flux is exhausted. Wetting failed, the joints look like raisins.");
+    chk("Time above liquidus", tal, 45, 150, "s",
+      "Cold joints. The paste waved at the pads and left.",
+      "Intermetallics grew fangs. Brittle joints, do not drop the board.");
+    chk("Peak temperature", peak, board.peakLo, board.peakHi, "C",
+      "The paste never fully melted. It is basically glue now.",
+      "Pads lifted, parts delaminated. The board smells like regret.");
+    chk("Cooling rate", cool, 1.2, 6.5, "C/s",
+      "Coarse grain structure. These joints will age like milk.",
+      "Thermal shock on the way out. The joints are stressed.");
+    var pass = true;
+    for (var c = 0; c < checks.length; c++) if (!checks[c].pass) pass = false;
+    return { checks: checks, pass: pass, ramp: ramp, soak: soak, tal: tal, peak: peak, cool: cool };
+  }
+
+  /* ---------- state ---------- */
+  var rfBoardIdx = 0;
+  var rfZones = [150, 180, 240, 200, 55];
+  var rfSpeed = RF_DEF_SPEED;
+  var rfPass = [false, false, false];
+  var rfWin = [null, null, null]; /* winning {zones, speed, grade} per board */
+  var rfEls = {};
+  var rfHist = null, rfPlayT = 0, rfPlaying = false, rfRaf = null;
+  var rfCanvas = null, rfCtx = null;
+
+  function rfZoneColor(t) {
+    var h = 210 - Math.max(0, Math.min(1, (t - 25) / 260)) * 210;
+    return "hsl(" + h.toFixed(0) + ",70%,42%)";
+  }
+
+  function rfDraw() {
+    if (!rfCtx || !rfCanvas) return;
+    var W = rfCanvas.width, H = rfCanvas.height;
+    var ctx = rfCtx;
+    ctx.clearRect(0, 0, W, H);
+    var ovenH = 118, chartY = ovenH + 26, chartH = H - chartY - 26;
+
+    /* oven tunnel */
+    var zw = W / 5;
+    for (var z = 0; z < 5; z++) {
+      ctx.fillStyle = rfZoneColor(rfZones[z]);
+      ctx.globalAlpha = 0.55;
+      ctx.fillRect(z * zw + 1, 8, zw - 2, ovenH - 16);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = "#2a3b37";
+      ctx.strokeRect(z * zw + 1, 8, zw - 2, ovenH - 16);
+      ctx.fillStyle = "#e9f4e8";
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("Z" + (z + 1), z * zw + zw / 2, 26);
+      ctx.fillText(rfZones[z] + "C", z * zw + zw / 2, 42);
+    }
+    /* conveyor */
+    ctx.strokeStyle = "#72827f";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, ovenH - 8);
+    ctx.lineTo(W, ovenH - 8);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    /* board position */
+    var bx = 0, bT = 25, bt = 0;
+    if (rfHist && rfHist.length) {
+      var idx = 0;
+      while (idx < rfHist.length - 1 && rfHist[idx][0] < rfPlayT) idx++;
+      bt = rfHist[idx][0]; bT = rfHist[idx][1]; bx = rfHist[idx][2];
+    }
+    var px = Math.min(W - 34, (bx / RF_TOTAL) * W);
+    ctx.fillStyle = "#0e5c2e";
+    ctx.fillRect(px, ovenH - 44, 32, 30);
+    ctx.fillStyle = "#c8c8c8";
+    ctx.fillRect(px + 4, ovenH - 40, 8, 8);
+    ctx.fillRect(px + 18, ovenH - 40, 8, 8);
+    ctx.fillRect(px + 4, ovenH - 28, 8, 8);
+    ctx.fillRect(px + 18, ovenH - 28, 8, 8);
+    /* thermocouple readout */
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold 12px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("TC " + bT.toFixed(0) + "C", 8, ovenH + 16);
+    ctx.textAlign = "right";
+    ctx.fillText("T+" + bt.toFixed(0) + "s", W - 8, ovenH + 16);
+    ctx.textAlign = "left";
+
+    /* chart */
+    var tMax = rfHist && rfHist.length ? rfHist[rfHist.length - 1][0] : 300;
+    var tMin = 0, yMax = 285;
+    function cx(t) { return (t - tMin) / (tMax - tMin) * W; }
+    function cy(T) { return chartY + chartH - (T / yMax) * chartH; }
+    var board = RF_BOARDS[rfBoardIdx];
+    /* soak band */
+    ctx.fillStyle = "rgba(0,229,255,.10)";
+    ctx.fillRect(0, cy(200), W, cy(150) - cy(200));
+    /* peak band */
+    ctx.fillStyle = "rgba(178,255,0,.10)";
+    ctx.fillRect(0, cy(board.peakHi), W, cy(board.peakLo) - cy(board.peakHi));
+    /* liquidus line */
+    ctx.strokeStyle = "#ff6b2c";
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(0, cy(217)); ctx.lineTo(W, cy(217)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#ff6b2c";
+    ctx.font = "10px monospace";
+    ctx.fillText("LIQ 217C", 6, cy(217) - 4);
+    /* axes labels */
+    ctx.fillStyle = "#72827f";
+    ctx.fillText("0", 4, chartY + chartH - 4);
+    ctx.fillText(tMax.toFixed(0) + "s", W - 34, chartY + chartH - 4);
+    ctx.fillText("285C", 4, chartY + 10);
+    /* curve */
+    if (rfHist && rfHist.length) {
+      ctx.strokeStyle = "#b2ff00";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      var started = false;
+      for (var i = 0; i < rfHist.length; i++) {
+        if (rfHist[i][0] > rfPlayT) break;
+        var X = cx(rfHist[i][0]), Y = cy(rfHist[i][1]);
+        if (!started) { ctx.moveTo(X, Y); started = true; }
+        else ctx.lineTo(X, Y);
+      }
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+  }
+
+  function rfLoop() {
+    if (!rfPlaying) return;
+    var now = (typeof performance !== "undefined") ? performance.now() : Date.now();
+    if (!rfLoop.last) rfLoop.last = now;
+    var dtReal = (now - rfLoop.last) / 1000;
+    rfLoop.last = now;
+    var simT = rfHist[rfHist.length - 1][0];
+    rfPlayT += dtReal * (simT / 12);
+    if (rfPlayT >= simT) {
+      rfPlayT = simT;
+      rfPlaying = false;
+      rfFinish();
+    }
+    rfDraw();
+    rfRead();
+    if (rfPlaying) rfRaf = requestAnimationFrame(rfLoop);
+    else rfRaf = null;
+  }
+
+  function rfKick() {
+    rfLoop.last = 0;
+    if (typeof requestAnimationFrame === "function") {
+      if (!rfRaf) rfRaf = requestAnimationFrame(rfLoop);
+    } else {
+      rfDraw(); rfRead();
+    }
+  }
+
+  function rfRead() {
+    if (!rfEls.read) return;
+    if (!rfHist || !rfHist.length) {
+      rfEls.read.textContent = "Set the zones, set the belt, run the profile.";
+      return;
+    }
+    var idx = 0;
+    while (idx < rfHist.length - 1 && rfHist[idx][0] < rfPlayT) idx++;
+    var zi = Math.min(4, Math.floor(rfHist[idx][2] / RF_ZONE_LEN));
+    rfEls.read.textContent = "T+" + rfHist[idx][0].toFixed(0) + "s, board " +
+      rfHist[idx][1].toFixed(0) + "C, zone Z" + (zi + 1) +
+      (rfPlaying ? " (running)" : " (done)");
+  }
+
+  function rfRun() {
+    if (rfPlaying) return;
+    var board = RF_BOARDS[rfBoardIdx];
+    rfHist = rfSimulate(rfZones.slice(), rfSpeed, board.tau);
+    rfPlayT = 0;
+    rfPlaying = true;
+    rfEls.run.disabled = true;
+    rfEls.result.className = "rf-result";
+    rfEls.result.innerHTML = "<span class='note'>Profile running, watch the thermocouple.</span>";
+    rfKick();
+  }
+
+  function rfFinish() {
+    var board = RF_BOARDS[rfBoardIdx];
+    var g = rfGrade(rfHist, board);
+    rfEls.run.disabled = false;
+    var html = "";
+    for (var i = 0; i < g.checks.length; i++) {
+      var c = g.checks[i];
+      html += "<div class='" + (c.pass ? "ok" : "bad") + "'>" +
+        (c.pass ? "[PASS] " : "[FAIL] ") + rfEsc(c.name) + ": " +
+        c.val.toFixed(c.unit === "s" ? 0 : 2) + c.unit +
+        " (window " + c.lo + " to " + c.hi + " " + c.unit + ")" +
+        (c.pass ? "" : "<br><span class='note'>" + rfEsc(c.note) + "</span>") +
+        "</div>";
+    }
+    rfEls.result.innerHTML = html;
+    rfEls.result.className = "rf-result " + (g.pass ? "win" : "fail");
+    if (g.pass) {
+      rfPass[rfBoardIdx] = true;
+      rfWin[rfBoardIdx] = { zones: rfZones.slice(), speed: rfSpeed, grade: g };
+      rfToast("Board passed, joints shiny");
+      rfMarkTabs();
+      rfCheckCard();
+    } else {
+      rfToast("Profile failed, check the notes");
+    }
+    rfDraw();
+    rfRead();
+  }
+
+  function rfMarkTabs() {
+    if (!rfEls.tabs) return;
+    var kids = rfEls.tabs.children;
+    for (var i = 0; i < kids.length; i++) {
+      kids[i].classList.toggle("done", !!rfPass[i]);
+      kids[i].classList.toggle("on", i === rfBoardIdx);
+    }
+  }
+
+  function rfCheckCard() {
+    var all = rfPass[0] && rfPass[1] && rfPass[2];
+    rfEls.card.disabled = !all;
+    if (all) rfToast("All three boards passed, profile card unlocked");
+  }
+
+  function rfCard() {
+    var d = new Date();
+    var lines = [
+      "REFLOW OVEN PROFILE CARD",
+      "Garage Inventions reflow bench, SAC305 lead-free, " + d.toISOString().slice(0, 10),
+      ""
+    ];
+    for (var i = 0; i < 3; i++) {
+      var w = rfWin[i], b = RF_BOARDS[i], g = w.grade;
+      lines.push(b.name.toUpperCase());
+      lines.push("  zones C: " + w.zones.join(" / ") + ", belt " + w.speed + " cm/min");
+      lines.push("  ramp " + g.ramp.toFixed(2) + " C/s, soak " + g.soak.toFixed(0) +
+        "s, TAL " + g.tal.toFixed(0) + "s, peak " + g.peak.toFixed(1) +
+        "C, cool " + g.cool.toFixed(2) + " C/s");
+      lines.push("");
+    }
+    lines.push("Signed: the oven");
+    var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    var a = rfEl("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "reflow-oven-profile-card.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+    rfToast("Profile card downloaded");
+  }
+
+  function rfReset() {
+    rfZones = RF_ZONE_META.map(function (m) { return m.def; });
+    rfSpeed = RF_DEF_SPEED;
+    for (var i = 0; i < rfEls.zoneInputs.length; i++) {
+      rfEls.zoneInputs[i].input.value = rfZones[i];
+      rfEls.zoneInputs[i].val.textContent = rfZones[i] + "C";
+    }
+    rfEls.speedInput.value = rfSpeed;
+    rfEls.speedVal.textContent = rfSpeed + " cm/min";
+    rfHist = null; rfPlayT = 0; rfPlaying = false;
+    if (rfRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rfRaf);
+    rfRaf = null;
+    rfEls.result.className = "rf-result";
+    rfEls.result.innerHTML = "<span class='note'>Oven reset to the house recipe. It fails, that is the point.</span>";
+    rfDraw();
+    rfRead();
+  }
+
+  function rfSelectBoard(i) {
+    rfBoardIdx = i;
+    rfMarkTabs();
+    rfEls.blurb.textContent = RF_BOARDS[i].blurb;
+    rfDraw();
+  }
+
+  function rfBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || rf$("rfBtn")) return;
+
+    var st = document.createElement("style");
+    st.textContent = RF_CSS;
+    document.head.appendChild(st);
+
+    var b = rfEl("button", "secondary", "Run the Reflow Oven");
+    b.id = "rfBtn";
+    b.addEventListener("click", function () {
+      rf$("rfOverlay").classList.add("open");
+      rfDraw();
+      rfRead();
+    });
+    box.appendChild(b);
+
+    var ov = rfEl("div", "rf-overlay");
+    ov.id = "rfOverlay";
+    var panel = rfEl("div", "rf-panel");
+    panel.innerHTML =
+      "<h3>The Reflow Oven</h3>" +
+      '<p class="rf-sub">Dial in a lead-free reflow profile: five zones, one conveyor, three boards with opinions. Pass all five process windows on every board and take the profile card.</p>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    var tabs = rfEl("div", "rf-tabs");
+    rfEls.tabs = tabs;
+    for (var ti = 0; ti < 3; ti++) {
+      (function (idx) {
+        var t = rfEl("button", idx === 0 ? "on" : "", RF_BOARDS[idx].name);
+        t.addEventListener("click", function () { rfSelectBoard(idx); });
+        tabs.appendChild(t);
+      })(ti);
+    }
+    panel.appendChild(tabs);
+
+    rfEls.blurb = rfEl("p", "rf-blurb", RF_BOARDS[0].blurb);
+    panel.appendChild(rfEls.blurb);
+
+    var grid = rfEl("div", "rf-grid");
+
+    var zcard = rfEl("div", "rf-card");
+    zcard.appendChild(rfEl("h5", null, "Zone air temps"));
+    rfEls.zoneInputs = [];
+    RF_ZONE_META.forEach(function (m, zi) {
+      var row = rfEl("div", "rf-row");
+      var lab = rfEl("label", null, "<span>" + rfEsc(m.name) + "</span>");
+      var val = rfEl("span", null, m.def + "C");
+      lab.appendChild(val);
+      var inp = rfEl("input", null, null);
+      inp.type = "range";
+      inp.min = m.min; inp.max = m.max; inp.step = 5; inp.value = m.def;
+      inp.setAttribute("aria-label", m.name + " temperature");
+      (function (idx, v) {
+        inp.addEventListener("input", function () {
+          rfZones[idx] = parseInt(inp.value, 10);
+          v.textContent = inp.value + "C";
+          rfDraw();
+        });
+      })(zi, val);
+      row.appendChild(lab);
+      row.appendChild(inp);
+      zcard.appendChild(row);
+      rfEls.zoneInputs.push({ input: inp, val: val });
+    });
+    grid.appendChild(zcard);
+
+    var scard = rfEl("div", "rf-card");
+    scard.appendChild(rfEl("h5", null, "Conveyor"));
+    var srow = rfEl("div", "rf-row");
+    var slab = rfEl("label", null, "<span>Belt speed</span>");
+    rfEls.speedVal = rfEl("span", null, RF_DEF_SPEED + " cm/min");
+    slab.appendChild(rfEls.speedVal);
+    rfEls.speedInput = rfEl("input", null, null);
+    rfEls.speedInput.type = "range";
+    rfEls.speedInput.min = RF_MIN_SPEED;
+    rfEls.speedInput.max = RF_MAX_SPEED;
+    rfEls.speedInput.step = 5;
+    rfEls.speedInput.value = RF_DEF_SPEED;
+    rfEls.speedInput.setAttribute("aria-label", "Belt speed");
+    rfEls.speedInput.addEventListener("input", function () {
+      rfSpeed = parseInt(rfEls.speedInput.value, 10);
+      rfEls.speedVal.textContent = rfSpeed + " cm/min";
+    });
+    srow.appendChild(slab);
+    srow.appendChild(rfEls.speedInput);
+    scard.appendChild(srow);
+    var how = rfEl("p", "rf-blurb",
+      "Process windows (SAC305): ramp 1 to 3 C/s, soak 60 to 120 s at 150 to 200C, " +
+      "time above liquidus 45 to 150 s, peak in the board band, cool 1.2 to 6.5 C/s. " +
+      "Slow the belt to buy time, cool the air to shed it.");
+    scard.appendChild(how);
+    grid.appendChild(scard);
+    panel.appendChild(grid);
+
+    var stage = rfEl("div", "rf-stage");
+    rfCanvas = rfEl("canvas");
+    rfCanvas.width = 660;
+    rfCanvas.height = 320;
+    rfCtx = rfCanvas.getContext("2d");
+    stage.appendChild(rfCanvas);
+    panel.appendChild(stage);
+
+    rfEls.read = rfEl("p", "rf-read", "Set the zones, set the belt, run the profile.");
+    panel.appendChild(rfEls.read);
+
+    rfEls.result = rfEl("div", "rf-result",
+      "<span class='note'>No profile run yet. The oven is cold and judgmental.</span>");
+    panel.appendChild(rfEls.result);
+
+    var foot = rfEl("div", "rf-foot");
+    rfEls.run = rfEl("button", "go", "Run the profile");
+    rfEls.run.addEventListener("click", rfRun);
+    var reset = rfEl("button", "ghost", "Reset");
+    reset.addEventListener("click", rfReset);
+    rfEls.card = rfEl("button", "ghost", "Download profile card");
+    rfEls.card.disabled = true;
+    rfEls.card.addEventListener("click", rfCard);
+    var close = rfEl("button", "ghost", "Close");
+    close.addEventListener("click", function () {
+      rf$("rfOverlay").classList.remove("open");
+      rfPlaying = false;
+      if (rfRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rfRaf);
+      rfRaf = null;
+      rfEls.run.disabled = false;
+    });
+    foot.appendChild(rfEls.run);
+    foot.appendChild(reset);
+    foot.appendChild(rfEls.card);
+    foot.appendChild(close);
+    panel.appendChild(foot);
+
+    rfSelectBoard(0);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", rfBuild);
+  } else {
+    rfBuild();
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      RF: {
+        BOARDS: RF_BOARDS,
+        ZONE_META: RF_ZONE_META,
+        simulate: rfSimulate,
+        grade: rfGrade
+      }
+    };
+  }
+
+})();
