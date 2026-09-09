@@ -7651,3 +7651,665 @@ function gyScoreLift(st) {
   }
 
 })();
+/* ============================================================
+   THE RELAY RACK
+   A ladder-logic relay panel: wire NO/NC contacts, relay coils
+   and a pilot lamp across four rungs, then prove four shift
+   specs with the foreman's step tester. Real PLC-style scan,
+   seal-in latching, dead-short and chatter fault detection.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- local helpers (never touch outer scope) ---------- */
+  var rr$ = function (id) { return document.getElementById(id); };
+  function rrEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function rrToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = rr$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function rrEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function rrStoreGet(k) {
+    try { return window.localStorage.getItem(k); } catch (e) { return null; }
+  }
+  function rrStoreSet(k, v) {
+    try { window.localStorage.setItem(k, v); } catch (e) { /* ignore */ }
+  }
+
+  /* ============================================================
+     PURE SIM (no DOM): ladder-logic scan
+     ============================================================ */
+  var RR_PALETTE = [
+    { label: "WIRE", wire: true },
+    { label: "NO·A", type: "no", src: "A" },
+    { label: "NC·A", type: "nc", src: "A" },
+    { label: "NO·B", type: "no", src: "B" },
+    { label: "NC·B", type: "nc", src: "B" },
+    { label: "NO·C", type: "no", src: "C" },
+    { label: "NC·C", type: "nc", src: "C" },
+    { label: "NO·K1", type: "no", src: "K1" },
+    { label: "NC·K1", type: "nc", src: "K1" },
+    { label: "NO·K2", type: "no", src: "K2" },
+    { label: "NC·K2", type: "nc", src: "K2" }
+  ];
+  var RR_OUTPUTS = ["NONE", "K1", "K2", "LAMP"];
+  var RR_SCAN_LIMIT = 16;
+
+  function rrSignal(src, inputs, coils) {
+    if (src === "A" || src === "B" || src === "C") return !!inputs[src];
+    return !!coils[src];
+  }
+  function rrClosed(palIdx, inputs, coils) {
+    var p = RR_PALETTE[palIdx];
+    if (!p || p.wire) return true;
+    var s = rrSignal(p.src, inputs, coils);
+    return p.type === "no" ? s : !s;
+  }
+  function rrBranchConducts(cells, inputs, coils) {
+    var has = false, i;
+    for (i = 0; i < cells.length; i++) { if (cells[i] !== 0) { has = true; break; } }
+    if (!has) return false;
+    for (i = 0; i < cells.length; i++) { if (!rrClosed(cells[i], inputs, coils)) return false; }
+    return true;
+  }
+  function rrRungConducts(rung, inputs, coils) {
+    return rrBranchConducts(rung.a, inputs, coils) || rrBranchConducts(rung.b, inputs, coils);
+  }
+  /* One full PLC-style scan: evaluate all rungs against the coil
+     state, update coils, repeat until nothing changes. Coils are
+     retentive across scans (that is what makes seal-in work). */
+  function rrScan(rungs, inputs, coils) {
+    var K = { K1: !!coils.K1, K2: !!coils.K2 };
+    var lamp = false, short = false, chatter = false, stable = false;
+    var iter, r, cond, out;
+    for (iter = 0; iter < RR_SCAN_LIMIT && !stable; iter++) {
+      stable = true;
+      var nK1 = false, nK2 = false, nLamp = false, nShort = false;
+      for (r = 0; r < rungs.length; r++) {
+        cond = rrRungConducts(rungs[r], inputs, K);
+        if (!cond) continue;
+        out = RR_OUTPUTS[rungs[r].out];
+        if (out === "NONE") nShort = true;
+        else if (out === "K1") nK1 = true;
+        else if (out === "K2") nK2 = true;
+        else if (out === "LAMP") nLamp = true;
+      }
+      if (nK1 !== K.K1 || nK2 !== K.K2) stable = false;
+      K.K1 = nK1; K.K2 = nK2;
+      lamp = nLamp; short = nShort;
+    }
+    if (!stable) chatter = true;
+    return { coils: K, lamp: lamp, short: short, chatter: chatter };
+  }
+  function rrBlankRungs() {
+    var rungs = [], r;
+    for (r = 0; r < 4; r++) rungs.push({ a: [0, 0, 0], b: [0, 0, 0], out: 0 });
+    return rungs;
+  }
+  function rrComboSteps(fn) {
+    var steps = [], a, b, c;
+    for (a = 0; a <= 1; a++) for (b = 0; b <= 1; b++) for (c = 0; c <= 1; c++) {
+      steps.push({
+        inputs: { A: a, B: b, C: c },
+        expect: !!fn(a, b, c),
+        note: "A=" + a + " B=" + b + " C=" + c
+      });
+    }
+    return steps;
+  }
+  var RR_SPECS = [
+    { id: "bench", tab: "Shift 1", name: "The Bench Light",
+      brief: "The pilot lamp must burn only while both pushbuttons A and B are held down. Every other combination stays dark.",
+      hint: "One rung, one branch: NO·A and NO·B in series, feeding the LAMP. Contacts in series make an AND.",
+      kind: "combo",
+      steps: rrComboSteps(function (a, b) { return a && b; }) },
+    { id: "cutout", tab: "Shift 2", name: "The Safety Cutout",
+      brief: "The lamp must burn when A or C is made, but the B kill switch always wins: any combination with B on stays dark.",
+      hint: "Two parallel branches make an OR. Put NC·B in series on both branches so the kill switch breaks each one.",
+      kind: "combo",
+      steps: rrComboSteps(function (a, b, c) { return (a || c) && !b; }) },
+    { id: "xor", tab: "Shift 3", name: "The Mismatch Alarm",
+      brief: "Two feed sensors, A and B. The alarm lamp must burn when exactly one of them is on, and stay dark when they agree.",
+      hint: "Two rungs into the same lamp: NO·A with NC·B on rung one, NC·A with NO·B on rung two. Both rungs feed LAMP.",
+      kind: "combo",
+      steps: rrComboSteps(function (a, b) { return (a ? 1 : 0) !== (b ? 1 : 0); }) },
+    { id: "latch", tab: "Shift 4", name: "The Conveyor Latch",
+      brief: "A is START (momentary), B is STOP (momentary), C is the overload trip. Pressing A must latch the motor on through relay K1 until B or C breaks the seal, and the lamp shows the motor. Steps run in order, and coils stay latched between steps.",
+      hint: "Rung 1 drives coil K1 with two parallel branches: NO·A alone on branch a, NO·K1 (the seal-in contact) on branch b, with NC·B and NC·C in series on both. Rung 2 puts NO·K1 in series with the LAMP.",
+      kind: "seq",
+      steps: [
+        { inputs: { A: 0, B: 0, C: 0 }, expect: false, note: "line at rest" },
+        { inputs: { A: 1, B: 0, C: 0 }, expect: true,  note: "START pressed" },
+        { inputs: { A: 0, B: 0, C: 0 }, expect: true,  note: "seal-in holds" },
+        { inputs: { A: 0, B: 0, C: 1 }, expect: false, note: "overload trips" },
+        { inputs: { A: 0, B: 0, C: 0 }, expect: false, note: "tripped, stays off" },
+        { inputs: { A: 1, B: 0, C: 0 }, expect: true,  note: "restart" },
+        { inputs: { A: 0, B: 1, C: 0 }, expect: false, note: "STOP pressed" },
+        { inputs: { A: 0, B: 0, C: 0 }, expect: false, note: "line stopped" }
+      ] }
+  ];
+  function rrRunSteps(rungs, spec) {
+    var coils = { K1: false, K2: false };
+    var results = [], i, st, scan, pass, verdict;
+    for (i = 0; i < spec.steps.length; i++) {
+      st = spec.steps[i];
+      if (spec.kind === "combo") { coils.K1 = false; coils.K2 = false; }
+      scan = rrScan(rungs, st.inputs, coils);
+      coils = scan.coils;
+      if (scan.short) {
+        pass = false;
+        verdict = "DEAD SHORT: a rung conducts straight across the rails with no load";
+      } else if (scan.chatter) {
+        pass = false;
+        verdict = "CHATTER: a relay is buzzing, the scan never settles";
+      } else {
+        pass = (scan.lamp === st.expect);
+        verdict = pass ? "PASS"
+          : ("lamp is " + (scan.lamp ? "ON" : "OFF") + ", spec wants " + (st.expect ? "ON" : "OFF"));
+      }
+      results.push({ n: i + 1, inputs: st.inputs, note: st.note, expect: st.expect,
+        got: scan.lamp, pass: pass, verdict: verdict });
+    }
+    var all = true, j;
+    for (j = 0; j < results.length; j++) { if (!results[j].pass) { all = false; break; } }
+    return { results: results, allPass: all };
+  }
+
+/* RR-SIM-END */
+
+  /* ---------- relay click audio ---------- */
+  var rrAudio = null;
+  function rrBlip(freq) {
+    try {
+      if (!rrAudio) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        rrAudio = new AC();
+      }
+      var t = rrAudio.currentTime;
+      var o = rrAudio.createOscillator();
+      var g = rrAudio.createGain();
+      o.type = "square";
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.05, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+      o.connect(g); g.connect(rrAudio.destination);
+      o.start(t); o.stop(t + 0.06);
+    } catch (e) { /* audio is a garnish, never a failure */ }
+  }
+
+  /* ---------- live state ---------- */
+  var S = {
+    rungs: rrBlankRungs(),
+    inputs: { A: 0, B: 0, C: 0 },
+    coils: { K1: false, K2: false },
+    power: false,
+    specIdx: 0,
+    passed: {},
+    lastScan: null
+  };
+  try {
+    var raw = rrStoreGet("rrPassedV1");
+    if (raw) S.passed = JSON.parse(raw) || {};
+  } catch (e) { S.passed = {}; }
+  function rrSavePassed() { rrStoreSet("rrPassedV1", JSON.stringify(S.passed)); }
+
+  function rrSpec() { return RR_SPECS[S.specIdx]; }
+
+  function rrRungText(rung, idx) {
+    function cells(cs) {
+      var parts = [];
+      for (var i = 0; i < cs.length; i++) {
+        if (cs[i] !== 0) parts.push(RR_PALETTE[cs[i]].label);
+      }
+      return parts.length ? parts.join(" + ") : "(empty)";
+    }
+    return "RUNG " + (idx + 1) + ":  branch a: " + cells(rung.a) +
+      "  ||  branch b: " + cells(rung.b) + "  -> " + RR_OUTPUTS[rung.out];
+  }
+  function rrWiringSheet() {
+    var lines = [];
+    lines.push("RELAY RACK WIRING SHEET");
+    lines.push("Garage Inventions: The Relay Rack");
+    lines.push("======================================");
+    lines.push("Date: " + new Date().toISOString().slice(0, 10));
+    lines.push("Rails: left = +24V, right = 0V. Branches are parallel, contacts in series.");
+    lines.push("");
+    for (var i = 0; i < S.rungs.length; i++) lines.push(rrRungText(S.rungs[i], i));
+    lines.push("");
+    lines.push("Live inputs: A=" + S.inputs.A + " B=" + S.inputs.B + " C=" + S.inputs.C);
+    lines.push("Coils: K1=" + (S.coils.K1 ? "ENERGIZED" : "dropped") +
+      " K2=" + (S.coils.K2 ? "ENERGIZED" : "dropped"));
+    return lines.join("\n");
+  }
+  function rrCertificate(spec) {
+    var lines = [];
+    lines.push("RELAY RACK SHIFT CERTIFICATE");
+    lines.push("Garage Inventions: The Relay Rack");
+    lines.push("======================================");
+    lines.push("Shift : " + spec.tab + ", " + spec.name);
+    lines.push("Date  : " + new Date().toISOString().slice(0, 10));
+    lines.push("Result: ALL " + spec.steps.length + " STEPS PASSED");
+    lines.push("");
+    lines.push("Proven wiring:");
+    for (var i = 0; i < S.rungs.length; i++) lines.push("  " + rrRungText(S.rungs[i], i));
+    lines.push("");
+    lines.push("Signed by the foreman. No contact was harmed in this shift.");
+    return lines.join("\n");
+  }
+  function rrDownload(name, text) {
+    var blob = new Blob([text], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 400);
+  }
+
+  /* ---------- live refresh (power flow + visuals) ---------- */
+  function rrRefresh(clicks) {
+    var scan = rrScan(S.rungs, S.power ? S.inputs : { A: 0, B: 0, C: 0 }, S.coils);
+    if (clicks) {
+      if (scan.coils.K1 !== S.coils.K1) rrBlip(scan.coils.K1 ? 1900 : 900);
+      if (scan.coils.K2 !== S.coils.K2) setTimeout(function () { rrBlip(scan.coils.K2 ? 1900 : 900); }, 70);
+    }
+    S.coils = scan.coils;
+    S.lastScan = scan;
+    var i, r, b, cell;
+    for (r = 0; r < 4; r++) {
+      var rung = S.rungs[r];
+      var cond = S.power && rrRungConducts(rung, S.inputs, S.coils);
+      var branches = [["a", rung.a], ["b", rung.b]];
+      for (b = 0; b < 2; b++) {
+        var bCond = S.power && rrBranchConducts(branches[b][1], S.inputs, S.coils);
+        for (i = 0; i < 3; i++) {
+          cell = rr$("rrSlot" + r + branches[b][0] + i);
+          if (!cell) continue;
+          cell.classList.toggle("live", bCond && rrClosed(rung[branches[b][0]][i], S.inputs, S.coils));
+          cell.classList.toggle("wire", rung[branches[b][0]][i] === 0);
+        }
+      }
+      var out = rr$("rrOut" + r);
+      if (out) out.classList.toggle("live", cond);
+    }
+    var k1 = rr$("rrCoilK1"), k2 = rr$("rrCoilK2"), lamp = rr$("rrLampChip");
+    if (k1) k1.classList.toggle("on", !!S.coils.K1);
+    if (k2) k2.classList.toggle("on", !!S.coils.K2);
+    if (lamp) lamp.classList.toggle("on", !!scan.lamp);
+    var pw = rr$("rrPower");
+    if (pw) {
+      pw.textContent = S.power ? "POWER: ON" : "POWER: OFF";
+      pw.classList.toggle("on", S.power);
+    }
+    var sws = { A: "rrSwA", B: "rrSwB", C: "rrSwC" };
+    for (var k in sws) {
+      var sw = rr$(sws[k]);
+      if (sw) sw.classList.toggle("on", !!S.inputs[k]);
+    }
+    var fault = rr$("rrFault");
+    if (fault) {
+      if (S.power && scan.short) {
+        fault.textContent = "FAULT: dead short across the rails. Give that rung a load.";
+        fault.className = "rr-fault bad";
+      } else if (S.power && scan.chatter) {
+        fault.textContent = "FAULT: relay chatter. A coil is fighting its own contact.";
+        fault.className = "rr-fault bad";
+      } else if (S.power) {
+        fault.textContent = "Panel live. Coils are retentive: they hold state until a rung drops them.";
+        fault.className = "rr-fault ok";
+      } else {
+        fault.textContent = "Panel dead. Flip the power to see current flow.";
+        fault.className = "rr-fault";
+      }
+    }
+  }
+
+  /* ---------- build ---------- */
+  function rrBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || rr$("rrBtn")) return;
+
+    var css = [
+      ".rr-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.93);display:none;align-items:center;justify-content:center;padding:14px;}",
+      ".rr-overlay.open{display:flex;}",
+      ".rr-panel{width:min(980px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--cyan);padding:16px;}",
+      ".rr-panel h3{font-family:'Chakra Petch',sans-serif;margin:0 0 6px;font-size:24px;letter-spacing:.02em;text-transform:uppercase;color:var(--cyan);}",
+      ".rr-sub{font-size:12px;line-height:1.7;color:#9fb3ae;margin:0 0 12px;}",
+      ".rr-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}",
+      ".rr-tab{flex:1;min-width:120px;min-height:44px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".rr-tab.active{border-color:var(--cyan);color:var(--cyan);}",
+      ".rr-tab.done{border-color:var(--acid);}",
+      ".rr-tab.done::after{content:' ✓';color:var(--acid);}",
+      ".rr-brief{border:1px dashed var(--cyan);padding:12px 14px;margin-bottom:12px;background:rgba(94,234,255,.05);}",
+      ".rr-brief p{margin:0;font-size:12px;line-height:1.7;color:var(--ink);}",
+      ".rr-brief strong{color:var(--cyan);}",
+      ".rr-rack{border:1px solid var(--line);background:#060b0c;padding:10px;margin-bottom:10px;}",
+      ".rr-rails{display:flex;justify-content:space-between;font-family:monospace;font-size:10px;color:#7c8d89;letter-spacing:.12em;text-transform:uppercase;padding:0 4px 6px;}",
+      ".rr-rung{border:1px solid var(--line);margin-bottom:8px;padding:8px;background:var(--panel-2);}",
+      ".rr-runghead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;}",
+      ".rr-runghead .t{font-family:'Chakra Petch',sans-serif;font-size:13px;font-weight:700;letter-spacing:.08em;color:var(--ink);}",
+      ".rr-out{min-height:44px;min-width:110px;padding:8px 10px;font-family:monospace;font-weight:700;font-size:13px;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".rr-out.live{border-color:var(--acid);color:var(--acid);box-shadow:0 0 10px rgba(199,255,56,.25);}",
+      ".rr-branch{display:grid;grid-template-columns:26px repeat(3,minmax(0,1fr));gap:6px;margin-bottom:6px;}",
+      ".rr-branch:last-child{margin-bottom:0;}",
+      ".rr-blabel{font-family:monospace;font-size:11px;color:#7c8d89;align-self:center;text-align:center;}",
+      ".rr-slot{min-height:48px;padding:8px 4px;font-family:monospace;font-weight:700;font-size:12px;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);touch-action:manipulation;}",
+      ".rr-slot.wire{color:#5c6f6b;font-weight:400;}",
+      ".rr-slot.live{border-color:var(--acid);color:var(--acid);box-shadow:0 0 8px rgba(199,255,56,.3);}",
+      ".rr-mini{min-height:36px;padding:4px 10px;font-family:monospace;font-size:11px;cursor:pointer;background:transparent;border:1px solid var(--line);color:#7c8d89;}",
+      ".rr-switches{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch;margin-bottom:10px;}",
+      ".rr-sw{flex:1;min-width:90px;min-height:56px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);touch-action:manipulation;}",
+      ".rr-sw.on{border-color:var(--orange);color:var(--orange);}",
+      ".rr-sw.power.on{border-color:var(--acid);color:var(--acid);}",
+      ".rr-chips{display:flex;gap:8px;flex:1 1 100%;flex-wrap:wrap;}",
+      ".rr-chip{flex:1;min-width:90px;text-align:center;border:1px solid var(--line);padding:8px;font-family:monospace;font-size:12px;color:#5c6f6b;background:var(--panel-2);}",
+      ".rr-chip.on{border-color:var(--acid);color:var(--acid);}",
+      ".rr-chip.lamp.on{background:rgba(199,255,56,.12);}",
+      ".rr-fault{font-family:monospace;font-size:12px;padding:10px 12px;border:1px solid var(--line);margin-bottom:10px;color:#9fb3ae;line-height:1.6;}",
+      ".rr-fault.bad{border-color:#ff4668;color:#ff8ba0;}",
+      ".rr-fault.ok{border-color:var(--acid);color:var(--acid);}",
+      ".rr-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".rr-big{min-height:52px;padding:10px 8px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);touch-action:manipulation;}",
+      ".rr-big.accent{border-color:var(--acid);color:var(--acid);}",
+      ".rr-big:disabled{opacity:.35;cursor:default;}",
+      ".rr-hint{border:1px dashed var(--orange);padding:12px 14px;margin-bottom:10px;font-size:12px;line-height:1.7;color:var(--ink);background:rgba(255,107,44,.05);}",
+      ".rr-hint strong{color:var(--orange);}",
+      ".rr-results{margin-bottom:10px;}",
+      ".rr-resrow{display:grid;grid-template-columns:44px 1fr auto;gap:10px;font-family:monospace;font-size:12px;padding:8px 10px;border:1px solid var(--line);margin-bottom:6px;color:var(--ink);line-height:1.5;}",
+      ".rr-resrow.pass{border-color:var(--acid);}",
+      ".rr-resrow.fail{border-color:#ff4668;}",
+      ".rr-resrow .v{font-weight:700;}",
+      ".rr-resrow.pass .v{color:var(--acid);}",
+      ".rr-resrow.fail .v{color:#ff8ba0;}",
+      ".rr-sum{font-family:monospace;font-size:13px;padding:10px 12px;border:1px solid var(--line);margin-bottom:6px;color:var(--ink);line-height:1.6;}",
+      ".rr-sum.win{border-color:var(--acid);color:var(--acid);}",
+      ".rr-sum.lose{border-color:#ff4668;color:#ff8ba0;}",
+      ".rr-foot{font-size:11px;color:#7c8d89;line-height:1.7;font-family:monospace;}",
+      "@media (max-width:640px){.rr-actions{grid-template-columns:1fr;}.rr-resrow{grid-template-columns:1fr;gap:2px;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = rrEl("button", "secondary", "Run the Relay Rack");
+    b.id = "rrBtn";
+    box.appendChild(b);
+
+    var ov = rrEl("div", "rr-overlay");
+    ov.id = "rrOverlay";
+
+    var tabsHtml = "";
+    for (var ti = 0; ti < RR_SPECS.length; ti++) {
+      tabsHtml += "<button class=\"rr-tab\" data-spec=\"" + ti + "\">" + rrEsc(RR_SPECS[ti].tab) + "</button>";
+    }
+
+    var rackHtml = "<div class=\"rr-rails\"><span>+24V rail</span><span>0V rail</span></div>";
+    for (var r = 0; r < 4; r++) {
+      rackHtml += "<div class=\"rr-rung\">" +
+        "<div class=\"rr-runghead\"><span class=\"t\">RUNG " + (r + 1) + "</span>" +
+        "<span><button class=\"rr-out\" id=\"rrOut" + r + "\">NONE</button> " +
+        "<button class=\"rr-mini\" data-clear=\"" + r + "\">clear</button></span></div>";
+      var brs = [["a", "a"], ["b", "b"]];
+      for (var bb = 0; bb < 2; bb++) {
+        rackHtml += "<div class=\"rr-branch\"><span class=\"rr-blabel\">" + brs[bb][0] + "</span>";
+        for (var i = 0; i < 3; i++) {
+          rackHtml += "<button class=\"rr-slot wire\" id=\"rrSlot" + r + brs[bb][1] + i + "\">WIRE</button>";
+        }
+        rackHtml += "</div>";
+      }
+      rackHtml += "</div>";
+    }
+
+    ov.innerHTML =
+      "<div class=\"rr-panel\" role=\"dialog\" aria-label=\"The Relay Rack relay panel game\">" +
+      "<h3>The Relay Rack</h3>" +
+      "<p class=\"rr-sub\">A ladder-logic relay panel, wired by hand. Tap any contact slot to cycle parts " +
+      "(NO and NC contacts for inputs A, B, C and relays K1, K2), tap an output to choose NONE, a coil, or the pilot lamp. " +
+      "Two branches per rung sit in parallel. Flip the power to watch current flow, then run the shift test to prove the spec.</p>" +
+      "<div class=\"rr-tabs\" id=\"rrTabs\">" + tabsHtml + "</div>" +
+      "<div class=\"rr-brief\" id=\"rrBrief\"></div>" +
+      "<div class=\"rr-rack\">" + rackHtml + "</div>" +
+      "<div class=\"rr-switches\">" +
+      "<button class=\"rr-sw\" id=\"rrSwA\">A</button>" +
+      "<button class=\"rr-sw\" id=\"rrSwB\">B</button>" +
+      "<button class=\"rr-sw\" id=\"rrSwC\">C</button>" +
+      "<button class=\"rr-sw power\" id=\"rrPower\">POWER: OFF</button>" +
+      "<div class=\"rr-chips\">" +
+      "<div class=\"rr-chip\" id=\"rrCoilK1\">K1 COIL</div>" +
+      "<div class=\"rr-chip\" id=\"rrCoilK2\">K2 COIL</div>" +
+      "<div class=\"rr-chip lamp\" id=\"rrLampChip\">PILOT LAMP</div>" +
+      "</div></div>" +
+      "<div class=\"rr-fault\" id=\"rrFault\"></div>" +
+      "<div class=\"rr-actions\">" +
+      "<button class=\"rr-big accent\" id=\"rrTest\">Run the shift test</button>" +
+      "<button class=\"rr-big\" id=\"rrHintBtn\">Foreman's hint</button>" +
+      "<button class=\"rr-big\" id=\"rrResetCoils\">Reset coils</button>" +
+      "<button class=\"rr-big\" id=\"rrClearRack\">Clear rack</button>" +
+      "<button class=\"rr-big\" id=\"rrSheet\">Wiring sheet</button>" +
+      "<button class=\"rr-big\" id=\"rrCert\" disabled>Shift certificate</button>" +
+      "</div>" +
+      "<div class=\"rr-hint\" id=\"rrHint\" hidden></div>" +
+      "<div class=\"rr-results\" id=\"rrResults\"></div>" +
+      "<p class=\"rr-foot\">The panel scans like a real PLC: every rung is evaluated, coils update together, " +
+      "and the scan repeats until nothing changes. Coils hold their state between scans, which is exactly " +
+      "what makes a seal-in latch possible. A rung that conducts with no load is a dead short. A coil that " +
+      "fights its own contact buzzes forever: that is chatter, and the foreman fails it on the spot.</p>" +
+      "<div class=\"rr-actions\"><button class=\"rr-big\" id=\"rrClose\">Close the panel</button></div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    function rrShowSpec() {
+      var spec = rrSpec();
+      rr$("rrBrief").innerHTML = "<p><strong>" + rrEsc(spec.tab + ": " + spec.name) + ".</strong> " +
+        rrEsc(spec.brief) + " (" + spec.steps.length + " steps.)</p>";
+      var hint = rr$("rrHint");
+      hint.hidden = true;
+      hint.innerHTML = "<strong>Foreman's hint:</strong> " + rrEsc(spec.hint);
+      var tabs = ov.querySelectorAll(".rr-tab");
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.toggle("active", i === S.specIdx);
+        tabs[i].classList.toggle("done", !!S.passed[RR_SPECS[i].id]);
+      }
+      rr$("rrCert").disabled = !S.passed[spec.id];
+      rr$("rrResults").innerHTML = "";
+    }
+
+    function rrClose() {
+      ov.classList.remove("open");
+      S.power = false;
+      rrRefresh(false);
+    }
+
+    function rrRunTest() {
+      var spec = rrSpec();
+      var res = rrRunSteps(S.rungs, spec);
+      var box2 = rr$("rrResults");
+      var html = "";
+      for (var i = 0; i < res.results.length; i++) {
+        var r = res.results[i];
+        html += "<div class=\"rr-resrow " + (r.pass ? "pass" : "fail") + "\">" +
+          "<span>#" + r.n + "</span>" +
+          "<span>" + rrEsc(r.note) + " &middot; want " + (r.expect ? "ON" : "OFF") +
+          ", got " + (r.got ? "ON" : "OFF") + "<br>" + rrEsc(r.verdict) + "</span>" +
+          "<span class=\"v\">" + (r.pass ? "PASS" : "FAIL") + "</span></div>";
+      }
+      var n = res.results.length, ok = 0;
+      for (var j = 0; j < res.results.length; j++) { if (res.results[j].pass) ok++; }
+      if (res.allPass) {
+        html += "<div class=\"rr-sum win\">SHIFT COMPLETE: " + ok + "/" + n +
+          " steps passed. The foreman signs the certificate.</div>";
+        if (!S.passed[spec.id]) {
+          S.passed[spec.id] = true;
+          rrSavePassed();
+        }
+        rrBlip(2400);
+        rrToast("Shift complete: " + spec.name);
+      } else {
+        html += "<div class=\"rr-sum lose\">SHIFT FAILED: " + ok + "/" + n +
+          " steps passed. Rewire and run it again.</div>";
+        rrBlip(300);
+      }
+      box2.innerHTML = html;
+      rrShowSpec();
+      if (res.allPass && S.specIdx < RR_SPECS.length - 1) {
+        setTimeout(function () {
+          if (rr$("rrOverlay").classList.contains("open")) rrToast("Next shift is on the tabs above");
+        }, 1200);
+      }
+    }
+
+    /* wire the rack */
+    var rr2, bb2, ii2;
+    for (rr2 = 0; rr2 < 4; rr2++) {
+      (function (r) {
+        var out = rr$("rrOut" + r);
+        out.addEventListener("click", function () {
+          S.rungs[r].out = (S.rungs[r].out + 1) % RR_OUTPUTS.length;
+          out.textContent = RR_OUTPUTS[S.rungs[r].out];
+          rrRefresh(true);
+        });
+      })(rr2);
+      var branches = ["a", "b"];
+      for (bb2 = 0; bb2 < 2; bb2++) {
+        (function (r, br) {
+          for (var i = 0; i < 3; i++) {
+            (function (r2, br2, i2) {
+              var cell = rr$("rrSlot" + r2 + br2 + i2);
+              cell.addEventListener("click", function () {
+                var cur = S.rungs[r2][br2][i2];
+                var nxt = (cur + 1) % RR_PALETTE.length;
+                S.rungs[r2][br2][i2] = nxt;
+                cell.textContent = RR_PALETTE[nxt].label;
+                rrRefresh(true);
+              });
+            })(r, br, i);
+          }
+        })(rr2, branches[bb2]);
+      }
+    }
+
+    var clears = ov.querySelectorAll("[data-clear]");
+    for (var ci = 0; ci < clears.length; ci++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          var r = parseInt(btn.getAttribute("data-clear"), 10);
+          S.rungs[r] = { a: [0, 0, 0], b: [0, 0, 0], out: 0 };
+          rr$("rrOut" + r).textContent = "NONE";
+          var brs = ["a", "b"], i;
+          for (var bb = 0; bb < 2; bb++) for (i = 0; i < 3; i++) {
+            rr$("rrSlot" + r + brs[bb] + i).textContent = "WIRE";
+          }
+          rrRefresh(true);
+        });
+      })(clears[ci]);
+    }
+
+    var tabs = ov.querySelectorAll(".rr-tab");
+    for (var tbi = 0; tbi < tabs.length; tbi++) {
+      (function (btn, idx) {
+        btn.addEventListener("click", function () {
+          S.specIdx = idx;
+          rrShowSpec();
+        });
+      })(tabs[tbi], tbi);
+    }
+
+    function rrFlipSw(k, id) {
+      rr$(id).addEventListener("click", function () {
+        S.inputs[k] = S.inputs[k] ? 0 : 1;
+        rrRefresh(true);
+      });
+    }
+    rrFlipSw("A", "rrSwA"); rrFlipSw("B", "rrSwB"); rrFlipSw("C", "rrSwC");
+    rr$("rrPower").addEventListener("click", function () {
+      S.power = !S.power;
+      rrBlip(S.power ? 1400 : 700);
+      rrRefresh(true);
+    });
+    rr$("rrTest").addEventListener("click", rrRunTest);
+    rr$("rrHintBtn").addEventListener("click", function () {
+      var h = rr$("rrHint");
+      h.hidden = !h.hidden;
+    });
+    rr$("rrResetCoils").addEventListener("click", function () {
+      S.coils = { K1: false, K2: false };
+      rrRefresh(true);
+      rrToast("Coils dropped");
+    });
+    rr$("rrClearRack").addEventListener("click", function () {
+      S.rungs = rrBlankRungs();
+      S.coils = { K1: false, K2: false };
+      for (var r = 0; r < 4; r++) {
+        rr$("rrOut" + r).textContent = "NONE";
+        var brs = ["a", "b"], i;
+        for (var bb = 0; bb < 2; bb++) for (i = 0; i < 3; i++) {
+          rr$("rrSlot" + r + brs[bb] + i).textContent = "WIRE";
+        }
+      }
+      rrRefresh(true);
+      rrToast("Rack cleared");
+    });
+    rr$("rrSheet").addEventListener("click", function () {
+      rrDownload("relay-rack-wiring.txt", rrWiringSheet());
+      rrToast("Wiring sheet downloaded");
+    });
+    rr$("rrCert").addEventListener("click", function () {
+      var spec = rrSpec();
+      if (!S.passed[spec.id]) return;
+      rrDownload("relay-rack-" + spec.id + "-certificate.txt", rrCertificate(spec));
+      rrToast("Certificate downloaded");
+    });
+    rr$("rrClose").addEventListener("click", rrClose);
+    ov.addEventListener("click", function (e) { if (e.target === ov) rrClose(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) rrClose();
+    });
+
+    b.addEventListener("click", function () {
+      ov.classList.add("open");
+      rrShowSpec();
+      rrRefresh(false);
+    });
+
+    rrShowSpec();
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", rrBuild);
+    } else {
+      rrBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      RR: {
+        PALETTE: RR_PALETTE,
+        OUTPUTS: RR_OUTPUTS,
+        SPECS: RR_SPECS,
+        blankRungs: rrBlankRungs,
+        scan: rrScan,
+        runSteps: rrRunSteps,
+        rungText: rrRungText
+      }
+    };
+  }
+
+})();
