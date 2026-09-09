@@ -11639,3 +11639,803 @@ if (typeof module !== "undefined" && module.exports) {
 }
 
 })();
+/* ============================================================
+   THE BURN-IN CHAMBER
+   GPU compute-part qualification bench for the TAPEOUT lab.
+   Three cards, one chamber, honest verdicts: design a stress
+   profile (workload, power limit, fan curve, soak time), watch
+   live telemetry from a real lumped-capacitance thermal model,
+   then call SHIP or RMA. Cook a card and it is scrap.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var bi$ = function (id) { return document.getElementById(id); };
+  function biToast(msg) {
+    var t = bi$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function biEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function biEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  var BI_CSS = [
+    ".bi-overlay{position:fixed;inset:0;background:rgba(4,7,7,.93);z-index:95;display:none;overflow-y:auto;padding:18px 12px;}",
+    ".bi-overlay.open{display:block;}",
+    ".bi-panel{max-width:1140px;margin:0 auto;background:var(--panel);border:1px solid var(--line);padding:22px;}",
+    ".bi-panel h3{font-family:'Chakra Petch',sans-serif;font-size:26px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.02em;color:var(--acid);}",
+    ".bi-sub{font-size:12px;line-height:1.65;color:#9fb3ae;margin:0 0 14px;max-width:80ch;}",
+    ".bi-sub a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan);}",
+    ".bi-sub b{color:var(--orange);}",
+    ".bi-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}",
+    ".bi-cardtab{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;padding:10px 14px;cursor:pointer;min-height:52px;text-align:left;min-width:170px;}",
+    ".bi-cardtab .sn{display:block;font-family:monospace;font-size:10px;color:#7c8d89;}",
+    ".bi-cardtab .st{display:block;font-size:9px;letter-spacing:.12em;text-transform:uppercase;margin-top:4px;color:#7c8d89;}",
+    ".bi-cardtab.on{border-color:var(--acid);}",
+    ".bi-cardtab .st.ok{color:var(--acid);}",
+    ".bi-cardtab .st.warn{color:var(--orange);}",
+    ".bi-cardtab .st.bad{color:#ff5d5d;}",
+    ".bi-brief{border:1px dashed var(--orange);background:rgba(255,107,44,.05);padding:12px 14px;margin-bottom:12px;font-size:12px;line-height:1.6;color:var(--ink);}",
+    ".bi-brief b{color:var(--orange);}",
+    ".bi-brief .par{color:var(--acid);}",
+    ".bi-ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;}",
+    ".bi-field{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".bi-field h4{margin:0 0 6px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".bi-field select{width:100%;background:var(--black,#0a0f0e);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;padding:10px 8px;min-height:44px;}",
+    ".bi-field input[type=range]{width:100%;accent-color:var(--acid);min-height:44px;}",
+    ".bi-field .val{font-family:monospace;font-size:13px;color:var(--acid);}",
+    ".bi-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;}",
+    ".bi-toolbar .secondary{min-height:48px;font-size:12px;padding:10px 18px;}",
+    ".bi-run{border-color:var(--acid) !important;color:var(--acid) !important;font-weight:700;}",
+    ".bi-run.running{border-color:#ff5d5d !important;color:#ff5d5d !important;}",
+    ".bi-prog{height:10px;border:1px solid var(--line);background:#0a0f0e;margin-bottom:12px;position:relative;overflow:hidden;}",
+    ".bi-prog i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--acid);}",
+    ".bi-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px;}",
+    ".bi-stat{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".bi-stat h4{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".bi-stat p{margin:0;font-family:monospace;font-size:18px;color:var(--ink);}",
+    ".bi-stat p.hot{color:var(--orange);}",
+    ".bi-stat p.crit{color:#ff5d5d;animation:biBlink 0.7s steps(2) infinite;}",
+    ".bi-stat p.good{color:var(--acid);}",
+    ".bi-stat .tag{display:inline-block;font-size:8px;letter-spacing:.1em;background:var(--orange);color:#0a0f0e;padding:1px 5px;margin-left:6px;vertical-align:middle;}",
+    "@keyframes biBlink{50%{opacity:.35;}}",
+    ".bi-charts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}",
+    ".bi-chartbox{border:1px solid var(--line);background:#0a0f0e;padding:8px;}",
+    ".bi-chartbox h5{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".bi-chartbox canvas{width:100%;height:120px;display:block;}",
+    ".bi-log{border:1px solid var(--line);background:var(--panel-2);padding:12px 14px;margin-bottom:12px;}",
+    ".bi-log h4{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".bi-log table{width:100%;border-collapse:collapse;font-family:monospace;font-size:10px;}",
+    ".bi-log th,.bi-log td{border:1px solid #1c2725;padding:5px 7px;text-align:left;}",
+    ".bi-log th{color:#7c8d89;text-transform:uppercase;letter-spacing:.08em;font-size:9px;}",
+    ".bi-log td.hot{color:var(--orange);}",
+    ".bi-log td.err{color:#ff5d5d;}",
+    ".bi-log .empty{font-size:11px;color:#5f726e;}",
+    ".bi-verdict{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}",
+    ".bi-verdict button{min-height:52px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;font-family:'Chakra Petch',sans-serif;}",
+    ".bi-verdict .ship{background:rgba(199,255,56,.08);border:1px solid var(--acid);color:var(--acid);}",
+    ".bi-verdict .rma{background:rgba(255,93,93,.08);border:1px solid #ff5d5d;color:#ff5d5d;}",
+    ".bi-verdict button:disabled{opacity:.35;cursor:not-allowed;}",
+    ".bi-verdict .called{opacity:1;box-shadow:0 0 0 2px currentColor;}",
+    ".bi-banner{border:1px solid var(--acid);background:rgba(199,255,56,.06);padding:14px 16px;margin:14px 0;display:none;}",
+    ".bi-banner.show{display:block;}",
+    ".bi-banner h4{margin:0 0 6px;font-family:'Chakra Petch',sans-serif;font-size:18px;text-transform:uppercase;color:var(--acid);}",
+    ".bi-banner p{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--ink);}",
+    ".bi-banner.fail{border-color:#ff5d5d;background:rgba(255,93,93,.06);}",
+    ".bi-banner.fail h4{color:#ff5d5d;}",
+    ".bi-score{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:11px;color:#9fb3ae;}",
+    ".bi-score b{font-family:monospace;font-size:15px;color:var(--acid);}",
+    ".bi-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}",
+    ".bi-foot .secondary{flex:1;min-height:48px;}",
+    "@media (max-width:900px){",
+    ".bi-charts{grid-template-columns:1fr;}",
+    ".bi-panel{padding:14px;}",
+    ".bi-panel h3{font-size:20px;}",
+    ".bi-overlay{padding:10px 8px;}",
+    ".bi-field select{font-size:16px;}",
+    "}"
+  ].join("\n");
+
+  /* ---------------- sim core (pure, unit-testable) ---------------- */
+
+  var BI_T_AMB = 24;      /* chamber ambient, C */
+  var BI_T_TARGET = 83;   /* boost starts derating above this */
+  var BI_T_MAX = 105;     /* thermal shutdown */
+  var BI_C = 65;          /* lumped thermal capacitance, J/K */
+
+  var BI_WORKLOADS = {
+    compute: { label: "Compute (shaders, full ALU)", power: 1.00, eccMem: 0 },
+    mixed:   { label: "Mixed (render loop)",         power: 0.85, eccMem: 1 },
+    memory:  { label: "Memory (VRAM hammer)",        power: 0.70, eccMem: 2 }
+  };
+  var BI_FANS = {
+    quiet:     { label: "Quiet (40% max)", h: 3.2 },
+    balanced:  { label: "Balanced (65% max)", h: 5.0 },
+    aggressive:{ label: "Aggressive (100%)", h: 7.5 },
+    auto:      { label: "Auto curve", h: null }
+  };
+
+  /* Hidden faults are shuffled among the three serials every shift,
+     so the bench cannot be memorized. */
+  function biMakeCards() {
+    var defs = [
+      { model: "VX-90X 24GB", serial: "BI-90117", tdp: 300, boost: 2520 },
+      { model: "VX-90X 24GB", serial: "BI-90122", tdp: 300, boost: 2520 },
+      { model: "VX-90X 24GB", serial: "BI-90131", tdp: 300, boost: 2520 }
+    ];
+    var faults = ["none", "paste", "vram"];
+    for (var i = faults.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = faults[i]; faults[i] = faults[j]; faults[j] = t;
+    }
+    defs.forEach(function (d, k) {
+      d.fault = faults[k];
+      d.cooling = d.fault === "paste" ? 0.78 : 1.0;   /* dried paste: poor heat transfer */
+      d.truth = d.fault === "none" ? "ship" : "rma";  /* healthy ships, faulty is RMA */
+    });
+    return defs;
+  }
+
+  function biFanH(curve, T) {
+    if (curve === "auto") {
+      var f = 3.2 + (T - 40) / 65 * 4.3;
+      if (f < 3.2) f = 3.2;
+      if (f > 7.5) f = 7.5;
+      return f;
+    }
+    return BI_FANS[curve].h;
+  }
+
+  /* One physics tick. s is mutated; returns an event summary. */
+  function biStep(s, card, prof, dt) {
+    var wl = BI_WORKLOADS[prof.workload];
+    var ev = { shutdown: false, ecc: 0 };
+    if (s.dead) return ev;
+
+    /* boost: full below target, derates linearly to 70% at (T_MAX - 10) */
+    var span = (BI_T_MAX - 10) - BI_T_TARGET;
+    var ratio = 1;
+    if (s.T > BI_T_TARGET) {
+      ratio = 1 - Math.min(1, (s.T - BI_T_TARGET) / span) * 0.30;
+    }
+    var clockTarget = card.boost * ratio;
+    s.clock += (clockTarget - s.clock) * Math.min(1, dt / 4);
+
+    s.power = card.tdp * wl.power * prof.powerLimit * (s.clock / card.boost);
+
+    var h = biFanH(prof.fan, s.T) * card.cooling;
+    s.fanPct = prof.fan === "auto"
+      ? Math.round(40 + Math.min(1, Math.max(0, (s.T - 40) / 65)) * 60)
+      : (prof.fan === "quiet" ? 40 : prof.fan === "balanced" ? 65 : 100);
+
+    s.T += (s.power - h * (s.T - BI_T_AMB)) * dt / BI_C;
+    s.t += dt;
+
+    /* ECC: Poisson-ish. Marginal VRAM screams under memory load,
+       and heat makes it worse. Healthy silicon is nearly silent. */
+    var rate;
+    if (card.fault === "vram") {
+      var base = wl.eccMem === 2 ? 0.60 : wl.eccMem === 1 ? 0.20 : 0.05;
+      var heat = 1 + Math.max(0, s.T - 65) * 0.06;
+      rate = base * heat * Math.pow(s.clock / card.boost, 2);
+    } else if (card.fault === "paste") {
+      rate = 0.005;
+    } else {
+      rate = 0.002;
+    }
+    var p = 1 - Math.exp(-rate * dt);
+    if (Math.random() < p) {
+      ev.ecc = 1 + (Math.random() < 0.15 ? Math.floor(Math.random() * 3) + 1 : 0);
+      s.ecc += ev.ecc;
+    }
+    if (s.maxT === undefined || s.T > s.maxT) s.maxT = s.T;
+
+    if (s.T >= BI_T_MAX) {
+      s.dead = true;
+      ev.shutdown = true;
+    }
+    return ev;
+  }
+
+  function biNewRun() {
+    return { T: BI_T_AMB + 2, clock: 0, power: 0, fanPct: 40, ecc: 0, t: 0, dead: false, maxT: BI_T_AMB + 2, samples: [] };
+  }
+
+  /* ---------------- UI ---------------- */
+
+  var biUI = null;
+
+  var BI_SPEEDS = { 1: 2, 4: 8, 16: 32 };   /* sim seconds per 100ms tick */
+
+  function biLoadBest() {
+    try {
+      var v = window.localStorage.getItem("biBest");
+      return v === null ? null : parseInt(v, 10);
+    } catch (e) { return null; }
+  }
+  function biSaveBest(v) {
+    try { window.localStorage.setItem("biBest", String(v)); } catch (e) {}
+  }
+
+  function biNewShift() {
+    return {
+      cards: biMakeCards(),
+      cardIdx: 0,
+      logs: [[], [], []],        /* per-card run summaries */
+      verdicts: [null, null, null],
+      running: false,
+      timer: null,
+      sim: biNewRun(),
+      prof: { workload: "compute", powerLimit: 1.0, fan: "balanced", dur: 180, speed: 4 },
+      score: 0,
+      finished: false
+    };
+  }
+
+  function biStatusOf(sh, i) {
+    if (sh.verdicts[i]) return { cls: "ok", txt: "VERDICT: " + sh.verdicts[i].toUpperCase() };
+    if (sh.logs[i].length) {
+      var secs = sh.logs[i].reduce(function (a, r) { return a + r.dur; }, 0);
+      if (sh.logs[i].some(function (r) { return r.shutdown; })) return { cls: "bad", txt: "KILLED IN CHAMBER" };
+      return { cls: secs >= 60 ? "ok" : "warn", txt: "LOGGED " + Math.round(secs) + "s" };
+    }
+    return { cls: "", txt: "UNTESTED" };
+  }
+
+  function biBuild() {
+    if (biUI) return biUI;
+    var st = document.createElement("style");
+    st.textContent = BI_CSS;
+    document.head.appendChild(st);
+
+    var box = document.querySelector(".dossier .actions");
+    if (box && !bi$("biBtn")) {
+      var b = biEl("button", "secondary", "Run the Burn-In Chamber");
+      b.id = "biBtn";
+      b.addEventListener("click", function () { bi$("biOverlay").classList.add("open"); });
+      box.appendChild(b);
+    }
+
+    var ov = biEl("div", "bi-overlay");
+    ov.id = "biOverlay";
+    var panel = biEl("div", "bi-panel");
+    panel.innerHTML =
+      "<h3>The Burn-In Chamber</h3>" +
+      '<p class="bi-sub">This is the qualification rig behind the <a href="https://dillingerstaffing.github.io/tapeout/" target="_blank" rel="noopener">TAPEOUT</a> lab: three compute cards came back from the field and every one needs an honest burn-in before it ships or is sent back for RMA. Pick a card, design the stress profile, run the chamber, read the telemetry, then call <b>SHIP</b> or <b>RMA</b>. Two of these cards are carrying faults you cannot see from the outside. Push a sick card too hard and it dies in the chamber, which counts as a miss. Scoring: 100 points per correct call, 300 for a clean sweep.</p>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    var ui = { sh: biNewShift(), charts: {}, chartCtx: {} };
+    biUI = ui;
+
+    /* card tabs */
+    ui.tabs = biEl("div", "bi-tabs");
+    panel.appendChild(ui.tabs);
+
+    /* brief */
+    ui.brief = biEl("div", "bi-brief",
+      "<b>How to read a card:</b> a healthy card holds boost near its rated clock, lands in the expected temperature band, and stays nearly silent on ECC. " +
+      "A card with dried thermal paste runs hot for the same power and sheds boost (watch the THROTTLING tag). " +
+      "A card with marginal VRAM throws correctable ECC bursts, loudest under the memory workload. " +
+      "Tip: match the stress to the suspicion. A compute soak will not catch bad VRAM, and a gentle memory pass will not catch bad paste. " +
+      "You need at least 60 seconds of logged burn per card before a verdict unlocks. " +
+      '<span class="par">House par: 300 points, zero kills.</span>');
+    panel.appendChild(ui.brief);
+
+    /* controls */
+    ui.ctl = biEl("div", "bi-ctl");
+    panel.appendChild(ui.ctl);
+
+    function field(title) {
+      var f = biEl("div", "bi-field", "<h4>" + biEsc(title) + "</h4>");
+      ui.ctl.appendChild(f);
+      return f;
+    }
+    var fw = field("Workload");
+    ui.selW = biEl("select", null, "");
+    Object.keys(BI_WORKLOADS).forEach(function (k) {
+      var o = document.createElement("option");
+      o.value = k; o.textContent = BI_WORKLOADS[k].label;
+      ui.selW.appendChild(o);
+    });
+    ui.selW.value = "compute";
+    fw.appendChild(ui.selW);
+
+    var fp = field("Power limit");
+    ui.rngP = document.createElement("input");
+    ui.rngP.type = "range"; ui.rngP.min = "50"; ui.rngP.max = "120"; ui.rngP.step = "5"; ui.rngP.value = "100";
+    ui.valP = biEl("div", "val", "100%");
+    ui.rngP.addEventListener("input", function () { ui.valP.textContent = ui.rngP.value + "%"; });
+    fp.appendChild(ui.rngP); fp.appendChild(ui.valP);
+
+    var ff = field("Fan curve");
+    ui.selF = biEl("select", null, "");
+    Object.keys(BI_FANS).forEach(function (k) {
+      var o = document.createElement("option");
+      o.value = k; o.textContent = BI_FANS[k].label;
+      ui.selF.appendChild(o);
+    });
+    ui.selF.value = "balanced";
+    ff.appendChild(ui.selF);
+
+    var fd = field("Soak time");
+    ui.selD = biEl("select", null, "");
+    [["60", "1 minute (quick screen)"], ["180", "3 minutes (standard)"], ["420", "7 minutes (torture test)"]].forEach(function (o) {
+      var el2 = document.createElement("option");
+      el2.value = o[0]; el2.textContent = o[1];
+      ui.selD.appendChild(el2);
+    });
+    ui.selD.value = "180";
+    fd.appendChild(ui.selD);
+
+    var fs = field("Chamber speed");
+    ui.selS = biEl("select", null, "");
+    [["1", "1x (real time)"], ["4", "4x (fast)"], ["16", "16x (time lapse)"]].forEach(function (o) {
+      var el2 = document.createElement("option");
+      el2.value = o[0]; el2.textContent = o[1] + "";
+      ui.selS.appendChild(el2);
+    });
+    ui.selS.value = "4";
+    fs.appendChild(ui.selS);
+
+    /* toolbar */
+    ui.bar = biEl("div", "bi-toolbar");
+    ui.runBtn = biEl("button", "secondary bi-run", "RUN CHAMBER");
+    ui.runBtn.addEventListener("click", biToggleRun);
+    ui.bar.appendChild(ui.runBtn);
+    ui.abortBtn = biEl("button", "secondary", "Abort run");
+    ui.abortBtn.addEventListener("click", function () { biEndRun(true); });
+    ui.bar.appendChild(ui.abortBtn);
+    ui.newBtn = biEl("button", "secondary", "New shift (reshuffle faults)");
+    ui.newBtn.addEventListener("click", function () {
+      if (ui.sh.running) { biToast("Finish or abort the run first"); return; }
+      ui.sh = biNewShift();
+      ui.finished = false;
+      biBanner(false, "", "");
+      biRenderAll();
+      biToast("New shift: faults reshuffled");
+    });
+    ui.bar.appendChild(ui.newBtn);
+    ui.closeBtn = biEl("button", "secondary", "Close chamber");
+    ui.closeBtn.addEventListener("click", function () {
+      if (ui.sh.running) biEndRun(true);
+      bi$("biOverlay").classList.remove("open");
+    });
+    ui.bar.appendChild(ui.closeBtn);
+    panel.appendChild(ui.bar);
+
+    ui.prog = biEl("div", "bi-prog", "<i></i>");
+    panel.appendChild(ui.prog);
+
+    /* stats */
+    ui.stats = biEl("div", "bi-stats");
+    var defs = [["TEMP", "stT", "C"], ["CLOCK", "stC", "MHz"], ["POWER", "stP", "W"], ["FAN", "stF", "%"], ["ECC ERRORS", "stE", ""], ["ELAPSED", "stL", "s"]];
+    ui.statEls = {};
+    defs.forEach(function (d) {
+      var s2 = biEl("div", "bi-stat", "<h4>" + d[0] + "</h4><p id=\"bi_" + d[1] + "\">--</p>");
+      ui.stats.appendChild(s2);
+      ui.statEls[d[1]] = s2.querySelector("p");
+    });
+    panel.appendChild(ui.stats);
+
+    /* charts */
+    ui.chartsWrap = biEl("div", "bi-charts");
+    var chartDefs = [
+      ["cT", "Temperature (C)", "--acid"],
+      ["cC", "Clock (MHz)", "--cyan"],
+      ["cP", "Power (W)", "--orange"],
+      ["cE", "ECC errors (cumulative)", "#ff5d5d"]
+    ];
+    chartDefs.forEach(function (cd) {
+      var bx = biEl("div", "bi-chartbox", "<h5>" + cd[1] + "</h5>");
+      var cv = document.createElement("canvas");
+      bx.appendChild(cv);
+      ui.chartsWrap.appendChild(bx);
+      ui.chartCtx[cd[0]] = { cv: cv, color: cd[2], key: cd[0] };
+    });
+    panel.appendChild(ui.chartsWrap);
+
+    /* burn log */
+    ui.log = biEl("div", "bi-log");
+    panel.appendChild(ui.log);
+
+    /* verdict */
+    ui.verd = biEl("div", "bi-verdict");
+    ui.shipBtn = biEl("button", "ship", "SHIP IT");
+    ui.rmaBtn = biEl("button", "rma", "RMA IT");
+    ui.shipBtn.addEventListener("click", function () { biVerdict("ship"); });
+    ui.rmaBtn.addEventListener("click", function () { biVerdict("rma"); });
+    ui.verd.appendChild(ui.shipBtn);
+    ui.verd.appendChild(ui.rmaBtn);
+    panel.appendChild(ui.verd);
+
+    /* score */
+    ui.scoreRow = biEl("div", "bi-score");
+    panel.appendChild(ui.scoreRow);
+
+    /* banner */
+    ui.banner = biEl("div", "bi-banner");
+    panel.appendChild(ui.banner);
+
+    /* foot */
+    ui.foot = biEl("div", "bi-foot");
+    ui.dlBtn = biEl("button", "secondary", "Download burn-in certificate");
+    ui.dlBtn.addEventListener("click", biDownload);
+    ui.dlBtn.style.display = "none";
+    ui.foot.appendChild(ui.dlBtn);
+    panel.appendChild(ui.foot);
+
+    biRenderAll();
+    return ui;
+  }
+
+  /* ---------------- render ---------------- */
+
+  function biRenderAll() {
+    biRenderTabs(); biRenderLog(); biRenderVerdict(); biRenderScore(); biRenderStats(biUI.sim);
+    biDrawCharts();
+  }
+
+  function biRenderTabs() {
+    var ui = biUI, sh = ui.sh;
+    ui.tabs.innerHTML = "";
+    sh.cards.forEach(function (c, i) {
+      var st = biStatusOf(sh, i);
+      var tb = biEl("button", "bi-cardtab" + (i === sh.cardIdx ? " on" : ""),
+        biEsc(c.model) + '<span class="sn">S/N ' + biEsc(c.serial) + '</span>' +
+        '<span class="st ' + st.cls + '">' + biEsc(st.txt) + "</span>");
+      tb.addEventListener("click", function () {
+        if (sh.running) { biToast("Card is in the chamber"); return; }
+        sh.cardIdx = i;
+        sh.sim = biNewRun();
+        biRenderAll();
+      });
+      ui.tabs.appendChild(tb);
+    });
+  }
+
+  function biRenderStats(s) {
+    var ui = biUI;
+    var E = ui.statEls;
+    var set = function (id, txt, cls) {
+      E[id].textContent = txt;
+      E[id].className = cls || "";
+    };
+    if (!s || s.t === 0) {
+      ["stT", "stC", "stP", "stF", "stE", "stL"].forEach(function (id) { set(id, "--"); });
+      return;
+    }
+    var tCls = s.T >= BI_T_MAX - 10 ? "crit" : s.T >= BI_T_TARGET ? "hot" : "";
+    set("stT", Math.round(s.T) + " C" + (s.T >= BI_T_TARGET && s.T < BI_T_MAX ? " THROTTLING" : ""), tCls);
+    var card = ui.sh.cards[ui.sh.cardIdx];
+    var clkPct = s.clock / card.boost;
+    set("stC", Math.round(s.clock) + " MHz", clkPct < 0.95 && s.t > 10 ? "hot" : "");
+    set("stP", Math.round(s.power) + " W", "");
+    set("stF", s.fanPct + "%", "");
+    set("stE", String(s.ecc), s.ecc > 20 ? "crit" : s.ecc > 0 ? "hot" : "good");
+    set("stL", Math.round(s.t) + "s", "");
+  }
+
+  function biRenderLog() {
+    var ui = biUI, sh = ui.sh, i = sh.cardIdx;
+    var rows = sh.logs[i];
+    var h = "<h4>Burn log, S/N " + biEsc(sh.cards[i].serial) + "</h4>";
+    if (!rows.length) {
+      ui.log.innerHTML = h + '<p class="empty">No runs yet. Design a profile and run the chamber.</p>';
+      return;
+    }
+    h += '<table><tr><th>Run</th><th>Workload</th><th>Power</th><th>Fan</th><th>Soak</th><th>Peak temp</th><th>Avg clock</th><th>ECC</th><th>Result</th></tr>';
+    rows.forEach(function (r, k) {
+      var hot = r.maxT >= BI_T_TARGET ? ' class="hot"' : "";
+      var ecc = r.ecc > 0 ? ' class="err"' : "";
+      h += "<tr><td>" + (k + 1) + "</td><td>" + biEsc(BI_WORKLOADS[r.workload].label.split(" (")[0]) + "</td>" +
+        "<td>" + Math.round(r.powerLimit * 100) + "%</td><td>" + biEsc(r.fan) + "</td>" +
+        "<td>" + Math.round(r.dur) + "s</td><td" + hot + ">" + Math.round(r.maxT) + " C</td>" +
+        "<td>" + Math.round(r.avgClock) + " MHz</td><td" + ecc + ">" + r.ecc + "</td>" +
+        "<td>" + (r.shutdown ? '<span style="color:#ff5d5d">SHUTDOWN</span>' : "complete") + "</td></tr>";
+    });
+    ui.log.innerHTML = h + "</table>";
+  }
+
+  function biCanJudge(i) {
+    var sh = biUI.sh;
+    if (sh.verdicts[i]) return false;
+    if (sh.logs[i].some(function (r) { return r.shutdown; })) return false; /* killed cards score 0, no verdict needed */
+    var secs = sh.logs[i].reduce(function (a, r) { return a + r.dur; }, 0);
+    return secs >= 60;
+  }
+
+  function biRenderVerdict() {
+    var ui = biUI, sh = ui.sh, i = sh.cardIdx;
+    var v = sh.verdicts[i];
+    var killed = sh.logs[i].some(function (r) { return r.shutdown; });
+    ui.shipBtn.disabled = !biCanJudge(i);
+    ui.rmaBtn.disabled = !biCanJudge(i);
+    ui.shipBtn.className = "ship" + (v === "ship" ? " called" : "");
+    ui.rmaBtn.className = "rma" + (v === "rma" ? " called" : "");
+    if (killed && !v) {
+      ui.shipBtn.disabled = true; ui.rmaBtn.disabled = true;
+      ui.shipBtn.textContent = "CARD DEAD";
+      ui.rmaBtn.textContent = "SCRAPPED (0 PTS)";
+    } else {
+      ui.shipBtn.textContent = "SHIP IT";
+      ui.rmaBtn.textContent = "RMA IT";
+    }
+  }
+
+  function biRenderScore() {
+    var ui = biUI, sh = ui.sh;
+    var done = sh.verdicts.filter(function (v) { return v; }).length;
+    var killed = sh.cards.filter(function (c, i) { return sh.logs[i].some(function (r) { return r.shutdown; }); }).length;
+    var best = biLoadBest();
+    ui.scoreRow.innerHTML = "Score <b>" + sh.score + " / 300</b> &middot; judged " + done + "/3" +
+      (killed ? " &middot; <span style=\"color:#ff5d5d\">" + killed + " killed</span>" : "") +
+      (best !== null ? " &middot; best " + best : "");
+  }
+
+  function biBanner(show, title, body, fail) {
+    var ui = biUI;
+    ui.banner.className = "bi-banner" + (show ? " show" : "") + (fail ? " fail" : "");
+    ui.banner.innerHTML = show ? ("<h4>" + title + "</h4><p>" + body + "</p>") : "";
+  }
+
+  /* ---------------- run loop ---------------- */
+
+  function biReadProfile() {
+    var ui = biUI;
+    return {
+      workload: ui.selW.value,
+      powerLimit: parseInt(ui.rngP.value, 10) / 100,
+      fan: ui.selF.value,
+      dur: parseInt(ui.selD.value, 10),
+      speed: parseInt(ui.selS.value, 10)
+    };
+  }
+
+  function biToggleRun() {
+    var ui = biUI, sh = ui.sh;
+    if (sh.running) { biEndRun(true); return; }
+    var i = sh.cardIdx;
+    if (sh.verdicts[i]) { biToast("Already judged, pick another card"); return; }
+    if (sh.logs[i].some(function (r) { return r.shutdown; })) { biToast("That card is dead"); return; }
+    sh.prof = biReadProfile();
+    sh.sim = biNewRun();
+    sh.sim.prof = sh.prof;
+    sh.running = true;
+    sh.clockSum = 0; sh.clockN = 0;
+    ui.runBtn.textContent = "STOP";
+    ui.runBtn.classList.add("running");
+    ui.prog.firstChild.style.width = "0%";
+    ui.timer = setInterval(biTick, 100);
+    biToast("Chamber sealed, burn started");
+  }
+
+  function biTick() {
+    var ui = biUI, sh = ui.sh;
+    if (!sh.running) return;
+    var dt = BI_SPEEDS[sh.prof.speed] || 8;
+    var card = sh.cards[sh.cardIdx];
+    var ev = biStep(sh.sim, card, sh.prof, dt);
+    sh.clockSum += sh.sim.clock; sh.clockN++;
+    if (sh.sim.samples.length < 2000) {
+      sh.sim.samples.push({ t: sh.sim.t, T: sh.sim.T, clock: sh.sim.clock, power: sh.sim.power, ecc: sh.sim.ecc });
+    }
+    ui.prog.firstChild.style.width = Math.min(100, sh.sim.t / sh.prof.dur * 100) + "%";
+    biRenderStats(sh.sim);
+    biDrawCharts();
+    if (ev.shutdown) {
+      biEndRun(false, true);
+      return;
+    }
+    if (sh.sim.t >= sh.prof.dur) biEndRun(false, false);
+  }
+
+  function biEndRun(aborted, shutdown) {
+    var ui = biUI, sh = ui.sh;
+    if (!sh.running) return;
+    clearInterval(ui.timer);
+    sh.running = false;
+    ui.runBtn.textContent = "RUN CHAMBER";
+    ui.runBtn.classList.remove("running");
+    var i = sh.cardIdx, s = sh.sim;
+    if (!aborted && s.t >= 20) {
+      sh.logs[i].push({
+        workload: sh.prof.workload,
+        powerLimit: sh.prof.powerLimit,
+        fan: sh.prof.fan,
+        dur: Math.round(s.t),
+        maxT: Math.round(s.maxT),
+        avgClock: Math.round(sh.clockN ? sh.clockSum / sh.clockN : 0),
+        ecc: s.ecc,
+        shutdown: !!shutdown
+      });
+      if (shutdown) biToast("THERMAL SHUTDOWN: card is scrap");
+      else biToast("Run logged");
+    } else if (aborted) {
+      biToast("Run aborted, not logged");
+    }
+    biRenderAll();
+  }
+
+  function biDrawCharts() {
+    var ui = biUI;
+    if (!ui || !ui.chartCtx) return;
+    var s = ui.sh.sim;
+    var draw = function (key, get, min, max, color, unit, lines) {
+      var c = ui.chartCtx[key];
+      if (!c) return;
+      var cv = c.cv;
+      var W = cv.clientWidth || 300, H = 120;
+      if (cv.width !== W * 2) { cv.width = W * 2; cv.height = H * 2; }
+      var g = cv.getContext("2d");
+      g.setTransform(2, 0, 0, 2, 0, 0);
+      g.clearRect(0, 0, W, H);
+      g.strokeStyle = "#1c2725";
+      g.lineWidth = 1;
+      for (var gy = 0; gy <= 4; gy++) {
+        var yy = 8 + (H - 16) * gy / 4;
+        g.beginPath(); g.moveTo(0, yy); g.lineTo(W, yy); g.stroke();
+      }
+      if (lines) {
+        lines.forEach(function (ln) {
+          var ly = 8 + (H - 16) * (1 - (ln.v - min) / (max - min));
+          g.strokeStyle = ln.c; g.setLineDash([4, 4]);
+          g.beginPath(); g.moveTo(0, ly); g.lineTo(W, ly); g.stroke();
+          g.setLineDash([]);
+          g.fillStyle = ln.c; g.font = "9px monospace";
+          g.fillText(ln.l, 4, Math.max(10, ly - 3));
+        });
+      }
+      var pts = s.samples;
+      if (pts.length < 2) return;
+      g.strokeStyle = color; g.lineWidth = 1.6;
+      g.beginPath();
+      var t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+      pts.forEach(function (p, k) {
+        var x = t1 > t0 ? (p.t - t0) / (t1 - t0) * (W - 8) + 4 : 4;
+        var v = get(p);
+        var y = 8 + (H - 16) * (1 - Math.min(1, Math.max(0, (v - min) / (max - min))));
+        if (k === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      });
+      g.stroke();
+      var last = get(pts[pts.length - 1]);
+      g.fillStyle = "#cfe3dd"; g.font = "10px monospace";
+      g.fillText(unit ? (Math.round(last) + " " + unit) : String(Math.round(last)), W - 64, 16);
+    };
+    var card = ui.sh.cards[ui.sh.cardIdx];
+    draw("cT", function (p) { return p.T; }, 20, 115, "#c7ff38", "C", [
+      { v: BI_T_TARGET, c: "#ff6b2c", l: "TARGET 83C" },
+      { v: BI_T_MAX, c: "#ff5d5d", l: "SHUTDOWN 105C" }
+    ]);
+    draw("cC", function (p) { return p.clock; }, 0, card.boost * 1.05, "#39d0ff", "MHz", [
+      { v: card.boost, c: "#39d0ff", l: "RATED " + card.boost }
+    ]);
+    draw("cP", function (p) { return p.power; }, 0, card.tdp * 1.25, "#ff6b2c", "W", [
+      { v: card.tdp, c: "#ff6b2c", l: "TDP " + card.tdp }
+    ]);
+    draw("cE", function (p) { return p.ecc; }, 0, Math.max(10, s.ecc * 1.2), "#ff5d5d", "errs", null);
+  }
+
+  /* ---------------- verdicts, scoring, certificate ---------------- */
+
+  function biVerdict(v) {
+    var ui = biUI, sh = ui.sh, i = sh.cardIdx;
+    if (!biCanJudge(i)) return;
+    sh.verdicts[i] = v;
+    var card = sh.cards[i];
+    var correct = (v === card.truth);
+    if (correct) sh.score += 100;
+    biToast(correct ? "Correct call: +100" : "Missed that one");
+    biRenderAll();
+    biFinishCheck();
+  }
+
+  function biFaultName(f) {
+    return f === "none" ? "healthy" : f === "paste" ? "dried thermal paste" : "marginal VRAM";
+  }
+
+  function biFinishCheck() {
+    var ui = biUI, sh = ui.sh;
+    var judged = sh.verdicts.filter(function (v) { return v; }).length;
+    var killed = sh.cards.filter(function (c, i) { return sh.logs[i].some(function (r) { return r.shutdown; }); }).length;
+    if (judged + killed < 3) return;
+    sh.finished = true;
+    var best = biLoadBest();
+    if (best === null || sh.score > best) biSaveBest(sh.score);
+    ui.dlBtn.style.display = "";
+    var detail = sh.cards.map(function (c, i) {
+      var v = sh.verdicts[i];
+      var fate = v ? (v === c.truth ? "correct" : "wrong") : "killed in chamber";
+      return "S/N " + c.serial + ": " + biFaultName(c.fault) + ", you called " + (v ? v.toUpperCase() : "nothing") + " (" + fate + ")";
+    }).join("<br>");
+    if (sh.score === 300) {
+      biBanner(true, "Clean sweep: 300 / 300",
+        "All three cards judged correctly and the chamber stands. " + detail +
+        "<br><br>This is the same honesty the TAPEOUT lab promises its buyers: every card ships with its real burn log, faults and all. " +
+        "Download the certificate below, it is the artifact this shift produced.",
+        false);
+    } else {
+      var coach = killed
+        ? "You cooked " + killed + " card" + (killed > 1 ? "s" : "") + ". Aggressive profiles find faults faster but the shutdown line is real: back the power limit down or open the fan curve before a long soak."
+        : "Read the logs again: hot-for-the-power means paste, ECC bursts under the memory workload mean VRAM. Run a fresh shift and hunt each fault with the workload that exposes it.";
+      biBanner(true, "Shift complete: " + sh.score + " / 300",
+        detail + "<br><br>" + coach + "<br><br>The certificate records exactly what happened, misses included. TAPEOUT publishes burn logs, not marketing.",
+        true);
+    }
+    biRenderScore();
+  }
+
+  function biDownload() {
+    var ui = biUI, sh = ui.sh;
+    var lines = [];
+    lines.push("BURN-IN CHAMBER: QUALIFICATION CERTIFICATE");
+    lines.push("Garage Inventions, " + new Date().toISOString().slice(0, 10));
+    lines.push("Lab: TAPEOUT compute-part qualification");
+    lines.push("----------------------------------------");
+    sh.cards.forEach(function (c, i) {
+      lines.push("");
+      lines.push("CARD " + (i + 1) + ": " + c.model + "  S/N " + c.serial);
+      lines.push("Hidden condition: " + biFaultName(c.fault));
+      sh.logs[i].forEach(function (r, k) {
+        lines.push("  Run " + (k + 1) + ": " + r.workload + " @ " + Math.round(r.powerLimit * 100) + "%, fan " + r.fan +
+          ", " + r.dur + "s soak, peak " + r.maxT + "C, avg clock " + r.avgClock + " MHz, ECC " + r.ecc +
+          (r.shutdown ? " *** THERMAL SHUTDOWN ***" : ""));
+      });
+      var v = sh.verdicts[i];
+      lines.push("  Verdict: " + (v ? v.toUpperCase() : "none (card killed)") +
+        (v ? (v === c.truth ? " (correct)" : " (WRONG)") : ""));
+    });
+    lines.push("");
+    lines.push("SHIFT SCORE: " + sh.score + " / 300");
+    lines.push("----------------------------------------");
+    lines.push("Every card ships with its real burn log. That is the TAPEOUT promise.");
+    lines.push("End of certificate.");
+    var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+    a.download = "burn-in-chamber-certificate.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      (window.URL || window.webkitURL).revokeObjectURL(a.href);
+      a.remove();
+    }, 500);
+    biToast("Certificate downloaded");
+  }
+
+  /* ---------------- init ---------------- */
+
+  function biInit() {
+    if (typeof document === "undefined") return;
+    if (!document.querySelector(".dossier .actions")) return;
+    biBuild();
+  }
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", biInit);
+    } else {
+      biInit();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      BI: {
+        step: biStep, fanH: biFanH, makeCards: biMakeCards, newRun: biNewRun,
+        WORKLOADS: BI_WORKLOADS, FANS: BI_FANS,
+        T_AMB: BI_T_AMB, T_TARGET: BI_T_TARGET, T_MAX: BI_T_MAX
+      }
+    };
+  }
+
+})();

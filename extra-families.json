@@ -334,5 +334,21 @@
   "power": "A standard 110-volt outlet and whoever is holding the lug wrench.",
   "failure": "A bent rim will lie to the sensors with a straight face, and the balancer will believe it every single time.",
   "transcript": "The Commuter Special came in swearing it was the alignment. The balancer read <strong>2.4 oz at 140 degrees</strong> and the alignment went very quiet. Two spins later the wheel was true and the owner bought the rack a coffee, which the rack cannot drink."
+ },
+ {
+  "names": [
+   "Burn-In Chamber",
+   "Thermal Confessional",
+   "The Honesty Oven"
+  ],
+  "purposes": [
+   "Soaks compute cards in a controlled hot box until the weak ones confess their faults.",
+   "Separates dried thermal paste from healthy silicon by watching boost clocks sag under load.",
+   "Produces a signed burn log with every card, because marketing copy never caught a bad GPU."
+  ],
+  "built": "A surplus server chassis, four thermocouples, a variable fan wall, and a strict no-lying policy.",
+  "power": "Mains power, plus the waste heat of the cards under test, which is the entire point.",
+  "failure": "Quiet fan curve plus a sick card equals a thermal shutdown and one card promoted to paperweight.",
+  "transcript": "The chamber does not grade on a curve. <strong>Either the card holds boost or it does not.</strong> Everything else is commentary."
  }
 ]
