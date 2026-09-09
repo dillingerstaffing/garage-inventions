@@ -286,21 +286,5 @@
     "power": "24V control rail, retentive coils, and a PLC-style scan loop that runs entirely in your browser.",
     "failure": "Wiring a rung with no load produces a dead short, and a coil fighting its own contact will buzz until the shift is failed on the spot.",
     "transcript": "The seal-in contact closed on the third scan and the lamp stayed lit after I let go of START. I have now built a one-bit memory out of a relay and I understand why the old panels had that particular smell of warm phenolic and confidence."
-  },
-  {
-    "names": [
-      "Wind Tunnel No. 9",
-      "The Stall Whisperer",
-      "Lift Ticket"
-    ],
-    "purposes": [
-      "Shapes wing sections from camber and thickness sliders and reports honest lift and drag from thin airfoil theory.",
-      "Teaches the stall by letting the flow separate on screen exactly when the numbers say it should.",
-      "Runs three flight-test trials: a heavy lift, an efficiency cruise, and a blind stall-angle reading."
-    ],
-    "built": "One canvas, 130 streamline particles, a NACA-style section generator, three sliders of nerve, and a foreman who trusts the math.",
-    "power": "A virtual drive motor good for 120 m/s at sea level, with altitude settings for thinner, lazier air.",
-    "failure": "Pushing past the stall angle collapses the lift curve and paints the wake orange, which is the tunnel's way of saying it told you so.",
-    "transcript": "The sweep climbed through twelve degrees with the lift readout still rising, and at <strong>15.2 degrees the numbers fell off a cliff</strong>. I called the stall within half a degree and the foreman signed the certificate without looking up."
   }
 ]
