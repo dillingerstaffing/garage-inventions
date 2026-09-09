@@ -5000,6 +5000,25 @@ if (document.readyState === "loading") {
    a three-pull endurance run. Too much advance or too lean a
    mixture detonates; too much retard melts the exhaust.
    ============================================================ */
+(function () {
+  /* Self-contained: local copies of the $ / toast / el helpers, so this
+     module never depends on helpers scoped inside other modules. */
+  var $ = function (id) { return document.getElementById(id); };
+  function toast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = $("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function el(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+
 var DY_MBT = 27;       /* best-torque timing, deg BTDC */
 var DY_AFR0 = 12.8;    /* best-power mixture */
 var DY_TPEAK = 230;    /* peak crank torque, Nm */
@@ -5423,6 +5442,7 @@ if (document.readyState === "loading") {
 } else {
   dyBuild();
 }
+})();
 
 /* ============================================================
    13. THE MANGONEL RANGE: torsion siege-engine bench (playable)
