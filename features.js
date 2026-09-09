@@ -5743,3 +5743,512 @@ if (document.readyState === "loading") {
   }
 
 })();
+
+
+/* ============================================================
+   14. THE GEAR SHOP: compound gearbox tuning bench (playable)
+   One 1200 RPM motor, three compound stages, six gears you
+   choose. Shaft spacing is fixed, so every mating pair must
+   total exactly 26 teeth or the gears clash. Three trials:
+   a reduction for a conveyor, near-direct for a mill, and a
+   compound overdrive for a centrifuge. Output RPM within
+   plus or minus 3 percent wins the trial; clash or miss and
+   the bench tells you exactly why.
+   Self-contained IIFE, local helpers only, no page globals.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- tiny local helpers (no reliance on page globals) ---------- */
+  function gs$(id) { return document.getElementById(id); }
+  function gsEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function gsToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = gs$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function gsFmt(n, d) { return Number(n).toFixed(d == null ? 1 : d); }
+
+  /* GS-PURE-START */
+  /* ---------- pure gearbox logic (no DOM; extracted for node tests) ---------- */
+  var GS_MOTOR_RPM = 1200;
+  var GS_MESH_SUM = 26;      /* fixed shaft spacing, in teeth */
+  var GS_TOL = 0.03;         /* plus or minus 3 percent */
+  var GS_LIMITS = { P: [8, 16], A1: [8, 20], B1: [8, 20], A2: [8, 20], B2: [8, 20], A3: [8, 20] };
+  var GS_ORDER = ["P", "A1", "B1", "A2", "B2", "A3"];
+  var GS_LABELS = { P: "P: motor pinion", A1: "A1: stage 1 driven", B1: "B1: stage 1 driver", A2: "A2: stage 2 driven", B2: "B2: stage 2 driver", A3: "A3: output gear" };
+  var GS_TRIALS = [
+    { name: "Trial 1: The Conveyor", short: "The Conveyor", target: 150,
+      desc: "The packaging conveyor wants 150 RPM at the drum. The motor gives 1200. Stack three reductions and mind the mesh: every mating pair must total exactly 26 teeth, because the shafts are bolted down and the gears do not negotiate." },
+    { name: "Trial 2: The Mill", short: "The Mill", target: 900,
+      desc: "The grain mill is happiest at 900 RPM. Close to direct drive, but the mesh rule still applies: 26 teeth per pair, no exceptions, no shims, no filing teeth in the parking lot." },
+    { name: "Trial 3: The Centrifuge", short: "The Centrifuge", target: 3000,
+      desc: "The centrifuge needs 3000 RPM from a 1200 RPM motor. This one runs the other way: compound overdrive. Big driving small, three times in a row, and every pair still totals 26 teeth." }
+  ];
+
+  function gsDefaultTeeth() {
+    return { P: 12, A1: 14, B1: 12, A2: 14, B2: 12, A3: 14 };
+  }
+  function gsClampTeeth(key, v) {
+    var lim = GS_LIMITS[key];
+    v = Math.round(v);
+    if (v < lim[0]) v = lim[0];
+    if (v > lim[1]) v = lim[1];
+    return v;
+  }
+  /* Meshes in chain order: [driverKey, drivenKey]. */
+  var GS_MESHES = [["P", "A1"], ["B1", "A2"], ["B2", "A3"]];
+  function gsMeshStatus(t) {
+    return GS_MESHES.map(function (m) {
+      var sum = t[m[0]] + t[m[1]];
+      return { a: m[0], b: m[1], sum: sum, ok: sum === GS_MESH_SUM };
+    });
+  }
+  function gsMeshesOk(t) {
+    var ms = gsMeshStatus(t);
+    for (var i = 0; i < ms.length; i++) if (!ms[i].ok) return false;
+    return true;
+  }
+  function gsRatio(t) {
+    return (t.P / t.A1) * (t.B1 / t.A2) * (t.B2 / t.A3);
+  }
+  function gsShaftRpms(t) {
+    var r0 = GS_MOTOR_RPM;
+    var r1 = r0 * (t.P / t.A1);
+    var r2 = r1 * (t.B1 / t.A2);
+    var r3 = r2 * (t.B2 / t.A3);
+    return [r0, r1, r2, r3];
+  }
+  function gsOutputRpm(t) { return gsShaftRpms(t)[3]; }
+  function gsWithinTol(rpm, target) {
+    return Math.abs(rpm - target) / target <= GS_TOL + 1e-9;
+  }
+  /* Grade a trial setup. Returns plain data; the UI formats it. */
+  function gsGrade(trialIdx, t) {
+    var target = GS_TRIALS[trialIdx].target;
+    var ms = gsMeshStatus(t);
+    var bad = ms.filter(function (m) { return !m.ok; });
+    if (bad.length > 0) {
+      return { ok: false, reason: "clash", bad: bad, rpm: gsOutputRpm(t), target: target };
+    }
+    var rpm = gsOutputRpm(t);
+    var dev = (rpm - target) / target;
+    if (gsWithinTol(rpm, target)) {
+      return { ok: true, reason: "held", rpm: rpm, dev: dev, target: target };
+    }
+    return { ok: false, reason: dev > 0 ? "fast" : "slow", rpm: rpm, dev: dev, target: target };
+  }
+  /* Mesh phase: driven tooth pattern offset so a gap faces the contact point
+     whenever the driver presents a tooth. Angles in degrees, SVG frame
+     (clockwise positive, 0 = +x). Contact is at 0 deg for the driver
+     (pointing right) and 180 deg for the driven (pointing left). */
+  function gsRotations(phi, t) {
+    var r0 = phi;
+    var r1 = -(t.P / t.A1) * r0 + 180 + 180 / t.A1;
+    var r2 = -(t.B1 / t.A2) * r1 + 180 + 180 / t.A2;
+    var r3 = -(t.B2 / t.A3) * r2 + 180 + 180 / t.A3;
+    return [r0, r1, r2, r3];
+  }
+  /* GS-PURE-END */
+
+  /* ---------- state ---------- */  var gs = {
+    open: false, trial: 0, teeth: gsDefaultTeeth(), wins: [],
+    phi: 0, last: 0
+  };
+
+  /* ---------- gear SVG ---------- */
+  var GS_M = 80 / 13;              /* module, px per tooth: spacing 80px = 26 teeth */
+  var GS_XS = [75, 155, 235, 315];
+  var GS_CY = 95;
+  var GS_COLORS = { P: "#c7ff38", A1: "#58e4e8", B1: "#ff6b2c", A2: "#58e4e8", B2: "#ff6b2c", A3: "#c7ff38" };
+  var GS_SHAFT_NAMES = ["M", "S1", "S2", "OUT"];
+  var GS_DIRS = ["CW", "CCW", "CW", "CCW"];
+
+  function gsPolar(cx, cy, r, deg) {
+    var a = deg * Math.PI / 180;
+    return (cx + r * Math.cos(a)).toFixed(1) + "," + (cy + r * Math.sin(a)).toFixed(1);
+  }
+  /* Tooth 0 is centered at body-angle 0 (pointing +x), so mesh phasing math holds. */
+  function gsGearGroup(key, t, cx, cy) {
+    var rp = GS_M * t / 2, ro = rp + 0.85 * GS_M, rr = Math.max(4, rp - 1.05 * GS_M);
+    var step = 360 / t, d = "";
+    for (var i = 0; i < t; i++) {
+      var c = i * step;
+      d += (i === 0 ? "M" : "L") +
+        gsPolar(cx, cy, rr, c - 0.30 * step) + "L" +
+        gsPolar(cx, cy, ro, c - 0.13 * step) + "L" +
+        gsPolar(cx, cy, ro, c + 0.13 * step) + "L" +
+        gsPolar(cx, cy, rr, c + 0.30 * step);
+    }
+    d += "Z";
+    var col = GS_COLORS[key];
+    var hub = Math.max(7, rp * 0.28).toFixed(1);
+    return '<g id="gsGear' + key + '">' +
+      '<path d="' + d + '" fill="#182625" stroke="' + col + '" stroke-width="1.6"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="' + hub + '" fill="#0a1416" stroke="' + col + '" stroke-width="1"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="#05090a"/></g>';
+  }
+  function gsDrawGears() {
+    var t = gs.teeth, s = "";
+    s += gsGearGroup("P", t.P, GS_XS[0], GS_CY);
+    s += gsGearGroup("A1", t.A1, GS_XS[1], GS_CY);
+    s += gsGearGroup("B1", t.B1, GS_XS[1], GS_CY);
+    s += gsGearGroup("A2", t.A2, GS_XS[2], GS_CY);
+    s += gsGearGroup("B2", t.B2, GS_XS[2], GS_CY);
+    s += gsGearGroup("A3", t.A3, GS_XS[3], GS_CY);
+    gs$("gsGears").innerHTML = s;
+  }
+  /* Rotation angles per frame come from gsRotations (pure section). */
+  function gsSetRot(id, cx, cy, deg) {
+    var g = document.getElementById(id);
+    if (g) g.setAttribute("transform", "rotate(" + deg.toFixed(2) + " " + cx + " " + cy + ")");
+  }
+  function gsTick(now) {
+    requestAnimationFrame(gsTick);
+    if (!gs.open || document.hidden) { gs.last = now; return; }
+    var dt = Math.min(0.1, (now - gs.last) / 1000);
+    gs.last = now;
+    gs.phi = (gs.phi + dt * 120) % 360;
+    var r = gsRotations(gs.phi, gs.teeth);
+    gsSetRot("gsGearP", GS_XS[0], GS_CY, r[0]);
+    gsSetRot("gsGearA1", GS_XS[1], GS_CY, r[1]);
+    gsSetRot("gsGearB1", GS_XS[1], GS_CY, r[1]);
+    gsSetRot("gsGearA2", GS_XS[2], GS_CY, r[2]);
+    gsSetRot("gsGearB2", GS_XS[2], GS_CY, r[2]);
+    gsSetRot("gsGearA3", GS_XS[3], GS_CY, r[3]);
+  }
+
+  function gsBuildSvg() {
+    var s = '<rect x="30" y="18" width="330" height="150" fill="#0b1214" stroke="#2a3b37"/>';
+    var i;
+    for (i = 0; i < 4; i++) {
+      s += '<rect x="' + (GS_XS[i] - 5) + '" y="150" width="10" height="18" fill="#151e1c" stroke="#2a3b37"/>';
+    }
+    s += '<rect x="20" y="168" width="350" height="10" fill="#101716" stroke="#2a3b37"/>';
+    s += '<rect x="8" y="68" width="46" height="54" fill="#151e1c" stroke="#c7ff38"/>' +
+      '<text x="31" y="92" text-anchor="middle" font-family="monospace" font-size="9" fill="#c7ff38">MOTOR</text>' +
+      '<text x="31" y="106" text-anchor="middle" font-family="monospace" font-size="9" fill="#e9f4e8">1200</text>';
+    var caps = [["P", "A1"], ["B1", "A2"], ["B2", "A3"]];
+    for (i = 0; i < 3; i++) {
+      var mx = (GS_XS[i] + GS_XS[i + 1]) / 2;
+      s += '<text id="gsCap' + i + '" x="' + mx + '" y="32" text-anchor="middle" font-family="monospace" font-size="10" fill="#72827f">' +
+        caps[i][0] + "+" + caps[i][1] + "</text>";
+    }
+    for (i = 0; i < 4; i++) {
+      s += '<text x="' + GS_XS[i] + '" y="190" text-anchor="middle" font-family="monospace" font-size="10" fill="#7c8d89">' +
+        GS_SHAFT_NAMES[i] + "</text>";
+    }
+    s += '<g id="gsGears"></g>';
+    gs$("gsSvg").innerHTML = s;
+  }
+
+  /* ---------- refresh ---------- */
+  function gsRefresh() {
+    var t = gs.teeth, i, k;
+    for (i = 0; i < GS_ORDER.length; i++) {
+      k = GS_ORDER[i];
+      var v = gs$("gsV" + k);
+      if (v) v.textContent = t[k] + " T";
+    }
+    var ms = gsMeshStatus(t);
+    for (i = 0; i < 3; i++) {
+      var row = gs$("gsMesh" + i), cap = gs$("gsCap" + i);
+      if (row) {
+        row.className = "gs-mrow " + (ms[i].ok ? "ok" : "bad");
+        row.innerHTML = "<span>" + ms[i].a + " + " + ms[i].b + " = " + ms[i].sum + "</span><span>" +
+          (ms[i].ok ? "MESH" : "CLASH (need 26)") + "</span>";
+      }
+      if (cap) cap.setAttribute("fill", ms[i].ok ? "#c7ff38" : "#ff4668");
+    }
+    var rpms = gsShaftRpms(t);
+    for (i = 0; i < 4; i++) {
+      var rEl = gs$("gsRpm" + i);
+      if (rEl) rEl.innerHTML = gsFmt(rpms[i]) + ' RPM <span class="dim">' + GS_DIRS[i] + "</span>";
+    }
+    var ratio = gsRatio(t), ratioTxt;
+    if (ratio < 0.999) ratioTxt = gsFmt(1 / ratio, 2) + " : 1 reduction";
+    else if (ratio > 1.001) ratioTxt = gsFmt(ratio, 2) + " : 1 overdrive";
+    else ratioTxt = "1.00 : 1 direct";
+    var rOut = gs$("gsRatio");
+    if (rOut) rOut.textContent = ratioTxt + "  (torque x" + gsFmt(1 / ratio, 2) + ")";
+    var trial = GS_TRIALS[gs.trial];
+    var out = gs$("gsOut");
+    if (out) {
+      out.innerHTML = "OUTPUT <strong>" + gsFmt(rpms[3]) + " RPM</strong> " + GS_DIRS[3] +
+        ' <span class="dim">target ' + trial.target + " RPM, plus or minus 3 percent</span>";
+      out.className = "gs-out " + (gsWithinTol(rpms[3], trial.target) && gsMeshesOk(t) ? "ok" : (gsMeshesOk(t) ? "" : "bad"));
+    }
+    gsDrawGears();
+    var tabs = ["gsTab0", "gsTab1", "gsTab2"];
+    for (i = 0; i < 3; i++) {
+      var tab = gs$(tabs[i]);
+      if (tab) {
+        var won = false;
+        for (var w = 0; w < gs.wins.length; w++) if (gs.wins[w].t === i) won = true;
+        tab.className = "gs-tab" + (i === gs.trial ? " active" : "") + (won ? " won" : "");
+        tab.textContent = GS_TRIALS[i].short + (won ? " PASS" : "");
+      }
+    }
+    var cert = gs$("gsCert");
+    if (cert) cert.disabled = gs.wins.length < 3;
+  }
+
+  function gsSetTrial(i) {
+    gs.trial = i;
+    var tr = GS_TRIALS[i];
+    gs$("gsTrialName").textContent = tr.name;
+    gs$("gsTrialTarget").textContent = "Target output: " + tr.target + " RPM, plus or minus 3 percent. Motor: 1200 RPM fixed.";
+    gs$("gsTrialDesc").textContent = tr.desc;
+    var res = gs$("gsResult");
+    res.className = "gs-result";
+    res.textContent = tr.name + " loaded. Set your teeth, check the meshes, run the trial.";
+    gsRefresh();
+  }
+
+  function gsBump(key, d) {
+    gs.teeth[key] = gsClampTeeth(key, gs.teeth[key] + d);
+    gsRefresh();
+  }
+
+  function gsRunTrial() {
+    var g = gsGrade(gs.trial, gs.teeth);
+    var res = gs$("gsResult");
+    var tr = GS_TRIALS[gs.trial];
+    if (g.reason === "clash") {
+      var parts = g.bad.map(function (m) { return m.a + " + " + m.b + " = " + m.sum; });
+      res.className = "gs-result fail";
+      res.textContent = "CLASH. " + parts.join("; ") + ". The shafts sit exactly 26 teeth apart, so a mating pair must total 26. No trial on a clashing box: fix the teeth and spin again.";
+      gsToast("Gears clash. Fix the mesh.");
+    } else if (g.reason === "fast") {
+      res.className = "gs-result fail";
+      res.textContent = "TOO FAST. Output " + gsFmt(g.rpm) + " RPM against a " + g.target + " RPM target (plus or minus 3 percent), running " +
+        gsFmt(g.dev * 100) + " percent over. Add reduction: smaller drivers, bigger drivens.";
+      gsToast("Too fast. Add reduction.");
+    } else if (g.reason === "slow") {
+      res.className = "gs-result fail";
+      res.textContent = "TOO SLOW. Output " + gsFmt(g.rpm) + " RPM against a " + g.target + " RPM target (plus or minus 3 percent), running " +
+        gsFmt(-g.dev * 100) + " percent under. Take reduction out: bigger drivers, smaller drivens.";
+      gsToast("Too slow. Remove reduction.");
+    } else {
+      res.className = "gs-result win";
+      res.textContent = "TRIAL HELD. Output " + gsFmt(g.rpm) + " RPM against " + g.target + " RPM (plus or minus 3 percent). All three meshes clean. Trial logged.";
+      gsToast("To the RPM. Trial held.");
+      var dup = false, w;
+      for (w = 0; w < gs.wins.length; w++) if (gs.wins[w].t === gs.trial) dup = true;
+      if (!dup) gs.wins.push({ t: gs.trial, teeth: JSON.parse(JSON.stringify(gs.teeth)), rpm: g.rpm });
+      if (gs.wins.length === 3) {
+        res.textContent += " All three trials held: the certificate is unlocked below.";
+      }
+    }
+    gsRefresh();
+  }
+
+  function gsRandomize() {
+    var keys = GS_ORDER;
+    for (var i = 0; i < keys.length; i++) {
+      var lim = GS_LIMITS[keys[i]];
+      gs.teeth[keys[i]] = lim[0] + Math.floor(Math.random() * (lim[1] - lim[0] + 1));
+    }
+    var res = gs$("gsResult");
+    res.className = "gs-result";
+    res.textContent = "The parts bin has spoken. Check the meshes before you run anything.";
+    gsToast("Random teeth fitted.");
+    gsRefresh();
+  }
+
+  function gsCert() {
+    var lines = gs.wins.map(function (w) {
+      var t = w.teeth;
+      return GS_TRIALS[w.t].name + ": P=" + t.P + " A1=" + t.A1 + " B1=" + t.B1 +
+        " A2=" + t.A2 + " B2=" + t.B2 + " A3=" + t.A3 + " -> " + gsFmt(w.rpm) + " RPM";
+    });
+    var txt =
+      "GEAR SHOP CERTIFICATE\n" +
+      "Garage Inventions Gear Shop\n" +
+      "================================\n" +
+      "Date   : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Result : ALL THREE TRIALS HELD TO PLUS OR MINUS 3 PERCENT\n" +
+      "Motor  : 1200 RPM fixed, three compound stages\n" +
+      "\nWinning gear trains:\n" + lines.join("\n") + "\n" +
+      "\nMesh rule honored: every mating pair totals exactly 26 teeth.\n" +
+      "No shims were used. The shafts never moved.\n" +
+      "\nSigned by the dial indicator. The teeth do not lie.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "gear-shop-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    gsToast("Gear shop certificate downloaded");
+  }
+
+  /* ---------- build ---------- */
+  function gsBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || gs$("gsBtn")) return;
+
+    var css = [
+      ".gs-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".gs-overlay.open{display:flex;}",
+      ".gs-panel{width:min(920px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+      ".gs-panel h3{font-family:'Chakra Petch',sans-serif;margin:0 0 6px;font-size:24px;letter-spacing:.02em;text-transform:uppercase;color:var(--acid);}",
+      ".gs-sub{font-size:12px;line-height:1.7;color:#9fb3ae;margin:0 0 12px;}",
+      ".gs-tabs{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;}",
+      ".gs-tab{flex:1;min-width:120px;min-height:44px;background:#0a1416;border:1px solid var(--line);color:var(--ink);font-family:'Chakra Petch',sans-serif;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;padding:10px 6px;}",
+      ".gs-tab.active{border-color:var(--acid);color:var(--acid);}",
+      ".gs-tab.won{border-color:var(--cyan);}",
+      ".gs-trial{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;margin-bottom:10px;}",
+      ".gs-trial h4{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-size:15px;color:var(--ink);text-transform:uppercase;letter-spacing:.02em;}",
+      ".gs-trial .tgt{font-family:monospace;font-size:12px;color:var(--cyan);margin:0 0 6px;}",
+      ".gs-trial p{margin:0;font-size:12px;line-height:1.6;color:#9fb3ae;}",
+      ".gs-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+      ".gs-stage svg{display:block;width:100%;height:auto;}",
+      ".gs-gears{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".gs-gear{border:1px solid var(--line);background:var(--panel-2);padding:8px 10px;}",
+      ".gs-gear h6{margin:0 0 4px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".gs-gear .val{font-family:monospace;font-size:18px;color:var(--ink);margin:2px 0 6px;}",
+      ".gs-step{display:flex;gap:6px;}",
+      ".gs-step button{flex:1;min-height:44px;background:#0a1416;border:1px solid var(--line);color:var(--ink);font-size:18px;cursor:pointer;font-family:monospace;}",
+      ".gs-step button:active{background:#1a2a28;}",
+      ".gs-mesh{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".gs-mrow{border:1px solid var(--line);padding:8px 10px;font-family:monospace;font-size:11px;display:flex;justify-content:space-between;gap:6px;background:var(--panel-2);}",
+      ".gs-mrow.ok{border-color:var(--acid);color:var(--acid);}",
+      ".gs-mrow.bad{border-color:#ff4668;color:#ff8ba0;}",
+      ".gs-read{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".gs-read .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+      ".gs-read .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".gs-read .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+      ".gs-read .t p .dim{color:#72827f;font-size:11px;}",
+      ".gs-ratio{font-family:monospace;font-size:12px;color:var(--cyan);margin:0 0 10px;}",
+      ".gs-out{border:1px solid var(--line);padding:10px 12px;font-family:monospace;font-size:14px;margin-bottom:10px;color:var(--ink);background:var(--panel-2);}",
+      ".gs-out .dim{color:#72827f;font-size:12px;}",
+      ".gs-out strong{color:var(--orange);font-size:18px;}",
+      ".gs-out.ok{border-color:var(--acid);}",
+      ".gs-out.ok strong{color:var(--acid);}",
+      ".gs-out.bad{border-color:#ff4668;}",
+      ".gs-result{padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;color:var(--ink);}",
+      ".gs-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".gs-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".gs-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;}",
+      ".gs-actions button{min-height:48px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".gs-actions button:disabled{opacity:.35;cursor:default;}",
+      ".gs-run{border-color:var(--orange) !important;color:var(--orange) !important;}",
+      "@media (max-width:640px){.gs-gears{grid-template-columns:repeat(2,minmax(0,1fr));}.gs-mesh{grid-template-columns:1fr;}.gs-read{grid-template-columns:repeat(2,minmax(0,1fr));}.gs-actions{grid-template-columns:1fr 1fr;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = gsEl("button", "secondary", "Open the Gear Shop");
+    b.id = "gsBtn";
+    b.addEventListener("click", function () {
+      gs.open = true;
+      gs.last = performance.now();
+      gs$("gsOverlay").classList.add("open");
+      gsRefresh();
+    });
+    box.appendChild(b);
+
+    var ov = gsEl("div", "gs-overlay");
+    ov.id = "gsOverlay";
+    var gearsHtml = GS_ORDER.map(function (k) {
+      var lim = GS_LIMITS[k];
+      return '<div class="gs-gear"><h6>' + GS_LABELS[k] + " (" + lim[0] + " to " + lim[1] + ')</h6>' +
+        '<div class="val" id="gsV' + k + '"></div>' +
+        '<div class="gs-step"><button data-k="' + k + '" data-d="-1" aria-label="Fewer teeth on ' + k + '">-</button>' +
+        '<button data-k="' + k + '" data-d="1" aria-label="More teeth on ' + k + '">+</button></div></div>';
+    }).join("");
+    var readHtml = GS_SHAFT_NAMES.map(function (n, i) {
+      return '<div class="t"><h6>Shaft ' + n + "</h6><p id=\"gsRpm" + i + "\"></p></div>";
+    }).join("");
+    ov.innerHTML =
+      '<div class="gs-panel" role="dialog" aria-label="The Gear Shop compound gearbox bench">' +
+      "<h3>The Gear Shop</h3>" +
+      '<p class="gs-sub">A compound gearbox bench: one 1200 RPM motor, three compound stages, six gears you choose. ' +
+      "Shaft spacing is fixed, so every mating pair must total exactly 26 teeth or the gears clash. " +
+      "Hit the trial target within plus or minus 3 percent and the trial is yours.</p>" +
+      '<div class="gs-tabs"><button class="gs-tab" id="gsTab0"></button><button class="gs-tab" id="gsTab1"></button><button class="gs-tab" id="gsTab2"></button></div>' +
+      '<div class="gs-trial"><h4 id="gsTrialName"></h4><p class="tgt" id="gsTrialTarget"></p><p id="gsTrialDesc"></p></div>' +
+      '<div class="gs-stage"><svg id="gsSvg" viewBox="0 0 390 195" role="img" aria-label="Animated gear train"></svg></div>' +
+      '<div class="gs-gears">' + gearsHtml + "</div>" +
+      '<div class="gs-mesh"><div class="gs-mrow" id="gsMesh0"></div><div class="gs-mrow" id="gsMesh1"></div><div class="gs-mrow" id="gsMesh2"></div></div>' +
+      '<div class="gs-read">' + readHtml + "</div>" +
+      '<p class="gs-ratio" id="gsRatio"></p>' +
+      '<div class="gs-out" id="gsOut"></div>' +
+      '<div class="gs-result" id="gsResult"></div>' +
+      '<div class="gs-actions">' +
+      '<button class="gs-run" id="gsRun">Run trial</button>' +
+      '<button class="secondary" id="gsRand">Randomize</button>' +
+      '<button class="secondary" id="gsCert" disabled>Certificate</button>' +
+      '<button class="secondary" id="gsClose">Close the shop</button>' +
+      "</div></div>";
+    document.body.appendChild(ov);
+
+    gsBuildSvg();
+
+    var i;
+    for (i = 0; i < 3; i++) {
+      (function (ti) {
+        gs$("gsTab" + ti).addEventListener("click", function () { gsSetTrial(ti); });
+      })(i);
+    }
+    var steps = ov.querySelectorAll(".gs-step button");
+    for (i = 0; i < steps.length; i++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          gsBump(btn.getAttribute("data-k"), parseInt(btn.getAttribute("data-d"), 10));
+        });
+      })(steps[i]);
+    }
+    gs$("gsRun").addEventListener("click", gsRunTrial);
+    gs$("gsRand").addEventListener("click", gsRandomize);
+    gs$("gsCert").addEventListener("click", gsCert);
+    gs$("gsClose").addEventListener("click", function () {
+      gs.open = false;
+      gs$("gsOverlay").classList.remove("open");
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && gs$("gsOverlay").classList.contains("open")) {
+        gs.open = false;
+        gs$("gsOverlay").classList.remove("open");
+      }
+    });
+
+    gsSetTrial(0);
+    requestAnimationFrame(gsTick);
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", gsBuild);
+    } else {
+      gsBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      gsGrade: gsGrade,
+      gsMeshStatus: gsMeshStatus,
+      gsMeshesOk: gsMeshesOk,
+      gsRatio: gsRatio,
+      gsShaftRpms: gsShaftRpms,
+      gsOutputRpm: gsOutputRpm,
+      gsWithinTol: gsWithinTol,
+      gsDefaultTeeth: gsDefaultTeeth,
+      gsRotations: gsRotations,
+      GS_TRIALS: GS_TRIALS,
+      GS_MESH_SUM: GS_MESH_SUM
+    };
+  }
+
+})();

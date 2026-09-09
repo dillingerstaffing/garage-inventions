@@ -238,5 +238,21 @@
     "power": "Single-phase 220V and a VFD that hums in a key the building superintendent dislikes.",
     "failure": "Any attempt to take the last two thou in one pass results in the last two thou, plus interest.",
     "transcript": "It held size through three finish passes and then the part measured <strong>exactly wrong</strong> in a way that implied intent. I re-cut the setup sheet instead of the part and the next one came in dead nuts. The lathe has never explained itself."
+  },
+  {
+    "names": [
+      "Torque Accountant",
+      "Backlash Auditor",
+      "Ratio Whisperer"
+    ],
+    "purposes": [
+      "Recomputes the household gear ratios nightly and files a variance report against the manufacturer's intentions.",
+      "Detects a single chipped tooth by ear and schedules the replacement before the noise becomes a personality trait.",
+      "Converts leftover rotational energy into smugness at a documented efficiency of 94 percent."
+    ],
+    "built": "A salvaged gearbox, a strobe tachometer, a parts washer with opinions, and a torque wrench calibrated against pure spite.",
+    "power": "Mains power, plus whatever it can siphon from the backlash of lesser machines.",
+    "failure": "If any mating pair fails to total exactly 26 teeth, it seizes in protest and refuses to turn until the math is corrected.",
+    "transcript": "It counted the teeth on the new pinion <strong>three times</strong> before allowing the mesh, then ran the train up to speed and held 150 RPM within a rounding error. The certificate printed itself. I framed it."
   }
 ]
