@@ -2757,7 +2757,7 @@ function rvBuild() {
   ov.innerHTML =
     '<div class="rv-panel" role="dialog" aria-label="The Silicon Anvil RISC-V test rig">' +
     "<h3>The Silicon Anvil</h3>" +
-    '<p class="rv-sub">A real RV32I core bolted to the bench. Write assembly, assemble it to machine code, step the silicon, pass a trial. Traps are free, certificates are earned.</p>' +
+    '<p class="rv-sub">A real RV32I core bolted to the bench. Write assembly, assemble it to machine code, step the silicon, pass a trial. Traps are free, certificates are earned. Craving the full curriculum? <a href="https://dillingerstaffing.github.io/riscv-playground/" target="_blank" rel="noopener" style="color:#ffd166;text-decoration:underline">Open the RISC-V Playground</a>, ten guided lessons and auto-graded challenges on the same core.</p>' +
     '<div class="rv-trials">' + trialsHtml + "</div>" +
     '<textarea class="rv-ed" id="rvEd" spellcheck="false"></textarea>' +
     '<div class="rv-btns">' +
