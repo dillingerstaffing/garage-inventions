@@ -350,5 +350,37 @@
   "power": "Mains power, plus the waste heat of the cards under test, which is the entire point.",
   "failure": "Quiet fan curve plus a sick card equals a thermal shutdown and one card promoted to paperweight.",
   "transcript": "The chamber does not grade on a curve. <strong>Either the card holds boost or it does not.</strong> Everything else is commentary."
+ },
+ {
+  "names": [
+   "Spill Can",
+   "Stack Saver",
+   "Register Raft"
+  ],
+  "purposes": [
+   "Catches virtual registers the moment the allocator spills them, before they hit the cold stack.",
+   "Keeps spilled values warm in a LIFO cozy so reloads come back at register-adjacent temperatures.",
+   "Auditions spilled registers for re-promotion when a physical register frees up mid-function."
+  ],
+  "built": "A coffee can, a butterfly net, a LIFO buffer wired from doorbell parts, and a label maker.",
+  "power": "Scavenged from the spill itself: every store to the stack trickle-charges a capacitor.",
+  "failure": "A net with a hole drops spilled values into the void. They return as NaN and nobody apologizes.",
+  "transcript": "Caught seventeen spills during a crypto round last Tuesday. <strong>Zero</strong> reached the stack. One register asked to stay in the can permanently. Request denied, it had work to do."
+ },
+ {
+  "names": [
+   "Fence Post",
+   "Barbed Wire",
+   "Peace Treaty"
+  ],
+  "purposes": [
+   "Erects interference fences between virtual registers whose live ranges overlap.",
+   "Patrols the fence line and sounds a klaxon when two neighbors reach for the same physical register.",
+   "Negotiates treaties: one register spills voluntarily in exchange for priority reloading."
+  ],
+  "built": "Survey stakes, a spool of actual barbed wire, a klaxon from a decommissioned forklift, and diplomacy.",
+  "power": "A hand crank. The fence is a moral construct, it does not need electricity, only commitment.",
+  "failure": "During the graveyard shift the klaxon stuck on and negotiated with itself until sunrise.",
+  "transcript": "Fence held through a fifteen-register crypto round with <strong>two</strong> orderly spills. The klaxon has been retired with honors and now guards the paint booth."
  }
 ]
