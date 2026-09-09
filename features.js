@@ -3025,4 +3025,496 @@ if (document.readyState === "loading") {
   rvBuild();
 }
 
+/* ============================================================
+   N. THE COIL-OVER LAB
+   A real quarter-car suspension bench: tune spring rate and
+   damping on a live RK4 simulation, then survive three road
+   trials (speed table, pothole, washboard). Pass all three to
+   earn a setup sheet.
+   ============================================================ */
+var CO_MS = 380, CO_MU = 42, CO_KT = 190000;
+var CO_TRAVEL_MAX = 0.10, CO_ACC_MAX = 5.5, CO_SETTLE_MAX = 1.8;
+var CO_TIRE_MIN = -3200, CO_RMS_MAX = 2.6;
+
+var CO_TRIALS = [
+  {
+    name: "Trial 1: The Speed Table",
+    desc: "A municipal speed table, 50 mm tall and 2.0 m long, taken at a dignified 6 m/s. The county thanks you for your patience.",
+    kind: "bump",
+    v: 6,
+    T: 5,
+    road: function (t) {
+      var h = 0.05, L = 2.0, v = 6, dur = L / v;
+      return (t >= 0 && t <= dur) ? h * Math.sin(Math.PI * t / dur) : 0;
+    }
+  },
+  {
+    name: "Trial 2: The Pothole",
+    desc: "A 30 mm deep crater, 1.0 m across, at 8 m/s. Compliments of the county, no note attached.",
+    kind: "pothole",
+    v: 8,
+    T: 5,
+    road: function (t) {
+      var d = 0.03, L = 1.0, v = 8, dur = L / v;
+      return (t >= 0 && t <= dur) ? -d * Math.sin(Math.PI * t / dur) : 0;
+    }
+  },
+  {
+    name: "Trial 3: The Washboard",
+    desc: "Corrugated gravel: 8 mm ripples on a 2.0 m wavelength at 15 m/s. Two full seconds of chatter. Hold on to your fillings.",
+    kind: "wash",
+    v: 15,
+    T: 5,
+    road: function (t) {
+      var amp = 0.008, wl = 2.0, v = 15;
+      return (t <= 2) ? amp * Math.sin(2 * Math.PI * v * t / wl) : 0;
+    }
+  }
+];
+
+function coDeriv(st, t, ks, c, roadFn) {
+  var zr = roadFn(t);
+  var Fs = ks * (st[0] - st[2]) + c * (st[1] - st[3]);
+  var Ft = CO_KT * (st[2] - zr);
+  return [st[1], -Fs / CO_MS, st[3], (Fs - Ft) / CO_MU];
+}
+
+/* Run the quarter-car sim with RK4. Returns metrics plus
+   replay samples (zs, zu, zr) at 240 Hz for the animation. */
+function coSim(ks, c, ti) {
+  var tr = CO_TRIALS[ti];
+  var dt = 0.0005, n = Math.floor(tr.T / dt);
+  var s = [0, 0, 0, 0], i, j;
+  var maxTravel = 0, minTire = Infinity, maxAcc = 0;
+  var sumAcc2 = 0, nAcc = 0, k1, k2, k3, k4, t, acc, travel, tire;
+  var rec = Math.floor(0.0041667 / dt) || 1;
+  var samples = [];
+  var bumpEnd = (tr.kind === "bump") ? 2.0 / 6 : (tr.kind === "pothole" ? 1.0 / 8 : 2.0);
+  for (i = 0; i < n; i++) {
+    t = i * dt;
+    var zr = tr.road(t);
+    travel = Math.abs(s[0] - s[2]);
+    if (travel > maxTravel) maxTravel = travel;
+    tire = CO_KT * (zr - s[2]);
+    if (tire < minTire) minTire = tire;
+    acc = (-ks * (s[0] - s[2]) - c * (s[1] - s[3])) / CO_MS;
+    if (Math.abs(acc) > maxAcc) maxAcc = Math.abs(acc);
+    var inRms = (tr.kind === "wash") ? (t > 0.4 && t < 2.0) : (t > tr.T - 1.5);
+    if (inRms) { sumAcc2 += acc * acc; nAcc++; }
+    if (i % rec === 0) samples.push([s[0], s[2], zr]);
+    k1 = coDeriv(s, t, ks, c, tr.road);
+    var a = [], b = [], d = [];
+    for (j = 0; j < 4; j++) { a[j] = s[j] + 0.5 * dt * k1[j]; }
+    k2 = coDeriv(a, t + 0.5 * dt, ks, c, tr.road);
+    for (j = 0; j < 4; j++) { b[j] = s[j] + 0.5 * dt * k2[j]; }
+    k3 = coDeriv(b, t + 0.5 * dt, ks, c, tr.road);
+    for (j = 0; j < 4; j++) { d[j] = s[j] + dt * k3[j]; }
+    k4 = coDeriv(d, t + dt, ks, c, tr.road);
+    for (j = 0; j < 4; j++) s[j] += dt / 6 * (k1[j] + 2 * k2[j] + 2 * k3[j] + k4[j]);
+  }
+  /* settle time after the bump ends (bump and pothole only) */
+  var settle = 0;
+  if (tr.kind !== "wash") {
+    var s2 = [0, 0, 0, 0];
+    settle = 99;
+    for (i = 0; i < n; i++) {
+      t = i * dt;
+      k1 = coDeriv(s2, t, ks, c, tr.road);
+      for (j = 0; j < 4; j++) { a[j] = s2[j] + 0.5 * dt * k1[j]; }
+      k2 = coDeriv(a, t + 0.5 * dt, ks, c, tr.road);
+      for (j = 0; j < 4; j++) { b[j] = s2[j] + 0.5 * dt * k2[j]; }
+      k3 = coDeriv(b, t + 0.5 * dt, ks, c, tr.road);
+      for (j = 0; j < 4; j++) { d[j] = s2[j] + dt * k3[j]; }
+      k4 = coDeriv(d, t + dt, ks, c, tr.road);
+      for (j = 0; j < 4; j++) s2[j] += dt / 6 * (k1[j] + 2 * k2[j] + 2 * k3[j] + k4[j]);
+      if (t > bumpEnd && settle === 99 && Math.abs(s2[0]) < 0.004 && Math.abs(s2[1]) < 0.03) settle = t - bumpEnd;
+    }
+  }
+  var fails = [];
+  if (maxTravel >= CO_TRAVEL_MAX) fails.push("bottomed: damper travel " + Math.round(maxTravel * 1000) + " mm over the 100 mm limit");
+  if (minTire <= CO_TIRE_MIN) fails.push("lost contact: tire unloaded " + Math.round(-minTire) + " N past the 3200 N limit (wheel hopped)");
+  if (tr.kind === "wash") {
+    var rms = nAcc ? Math.sqrt(sumAcc2 / nAcc) : 0;
+    if (rms >= CO_RMS_MAX) fails.push("chatter: RMS cabin accel " + rms.toFixed(2) + " m/s^2 over the 2.6 limit");
+  } else {
+    if (maxAcc >= CO_ACC_MAX) fails.push("harsh: peak cabin accel " + maxAcc.toFixed(2) + " m/s^2 over the 5.5 limit");
+    if (settle >= CO_SETTLE_MAX) fails.push("floaty: settle time " + settle.toFixed(2) + " s over the 1.8 s limit");
+  }
+  return {
+    samples: samples, dtSamp: rec * dt,
+    maxTravel: maxTravel, minTire: minTire, maxAcc: maxAcc,
+    rmsAcc: nAcc ? Math.sqrt(sumAcc2 / nAcc) : 0, settle: settle,
+    pass: fails.length === 0, fails: fails
+  };
+}
+
+function coHint(fails) {
+  var tips = [];
+  fails.forEach(function (f) {
+    if (f.indexOf("harsh") === 0 || f.indexOf("chatter") === 0) tips.push("too harsh: soften the spring, ease off the damping, or both");
+    if (f.indexOf("floaty") === 0) tips.push("too bouncy: add damping to calm it down");
+    if (f.indexOf("bottomed") === 0) tips.push("bottoming out: stiffen the spring (a touch more damping helps too)");
+    if (f.indexOf("lost contact") === 0) tips.push("wheel hopped: soften damping so the tire stays planted");
+  });
+  return tips.length ? tips.join(" ") : "";
+}
+
+function coFmt(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+var cos = null;
+
+function coBuild() {
+  var box = document.querySelector(".dossier .actions");
+  if (!box || $("coLabBtn")) return;
+
+  var css = [
+    ".co-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".co-overlay.open{display:flex;}",
+    ".co-panel{width:min(860px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+    ".co-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".co-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".co-sliders{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}",
+    ".co-ctl{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".co-ctl h6{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".co-ctl .val{font-family:monospace;font-size:13px;color:var(--ink);margin-bottom:6px;}",
+    ".co-ctl input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+    ".co-presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".co-presets button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:var(--panel-2);border:1px solid var(--line);color:var(--cyan);}",
+    ".co-trials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".co-trial{border:1px solid var(--line);padding:10px;background:var(--panel-2);display:flex;flex-direction:column;gap:8px;min-width:0;}",
+    ".co-trial h5{margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+    ".co-trial p{margin:0;font-size:11px;color:var(--ink);line-height:1.6;flex:1;}",
+    ".co-trial .badge{font-family:monospace;font-size:11px;padding:4px 8px;border:1px solid var(--line);color:#72827f;text-align:center;}",
+    ".co-trial .badge.pass{border-color:var(--acid);color:var(--acid);}",
+    ".co-trial .badge.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".co-trial button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--orange);color:var(--orange);}",
+    ".co-trial button:disabled{opacity:.35;cursor:default;}",
+    ".co-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+    ".co-stage canvas{display:block;width:100%;height:240px;}",
+    ".co-tel{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".co-tel .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+    ".co-tel .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".co-tel .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+    ".co-tel .t p.bad{color:#ff8ba0;}",
+    ".co-result{margin-top:0;padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;}",
+    ".co-result.win{border-color:var(--acid);color:var(--acid);}",
+    ".co-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".co-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".co-foot .secondary{flex:1;min-height:44px;}",
+    "@media (max-width:640px){.co-sliders{grid-template-columns:1fr;}.co-trials{grid-template-columns:1fr;}.co-presets{grid-template-columns:1fr;}.co-tel{grid-template-columns:1fr;}}"
+  ].join("\n");
+  var st = document.createElement("style");
+  st.textContent = css;
+  document.head.appendChild(st);
+
+  var b = el("button", "secondary", "Open the Coil-Over Lab");
+  b.id = "coLabBtn";
+  b.addEventListener("click", function () { $("coLabOverlay").classList.add("open"); coDraw(0, null, null); });
+  box.appendChild(b);
+
+  var trialsHtml = CO_TRIALS.map(function (tr, i) {
+    return '<div class="co-trial"><h5>' + tr.name + '</h5><p>' + tr.desc + '</p>' +
+      '<div class="badge" id="coBadge' + i + '">not run</div>' +
+      '<button id="coRun' + i + '">Run trial</button></div>';
+  }).join("");
+
+  var ov = el("div", "co-overlay");
+  ov.id = "coLabOverlay";
+  ov.innerHTML =
+    '<div class="co-panel" role="dialog" aria-label="The Coil-Over Lab suspension bench">' +
+    "<h3>The Coil-Over Lab</h3>" +
+    '<p class="co-sub">A quarter-car rig with real physics (380 kg body, 42 kg wheel, live tire spring). Tune the spring rate and damping, then survive three road trials. Pass all three and the bench signs your setup sheet.</p>' +
+    '<div class="co-sliders">' +
+    '<div class="co-ctl"><h6>Spring rate</h6><div class="val" id="coKsVal"></div>' +
+    '<input type="range" id="coKs" min="12000" max="70000" step="1000" value="30000" aria-label="Spring rate"></div>' +
+    '<div class="co-ctl"><h6>Damping</h6><div class="val" id="coCVal"></div>' +
+    '<input type="range" id="coC" min="800" max="8000" step="100" value="3000" aria-label="Damping"></div>' +
+    "</div>" +
+    '<div class="co-presets">' +
+    '<button id="coPComfort">Comfort tune</button>' +
+    '<button id="coPSport">Sport tune</button>' +
+    '<button id="coPTrack">Track tune</button>' +
+    "</div>" +
+    '<div class="co-trials">' + trialsHtml + "</div>" +
+    '<div class="co-stage"><canvas id="coCanvas"></canvas></div>' +
+    '<div class="co-tel">' +
+    '<div class="t"><h6>Cabin accel</h6><p id="coTelAcc">--</p></div>' +
+    '<div class="t"><h6>Damper travel</h6><p id="coTelTrav">--</p></div>' +
+    '<div class="t"><h6>Tire contact</h6><p id="coTelTire">--</p></div>' +
+    "</div>" +
+    '<div class="co-result" id="coResult">Set your spring and damping, then run a trial.</div>' +
+    '<div class="co-foot">' +
+    '<button class="secondary" id="coSheetBtn" disabled>Download setup sheet</button>' +
+    '<button class="secondary" id="coClose">Close</button>' +
+    "</div>" +
+    "</div>";
+  document.body.appendChild(ov);
+
+  cos = { ks: 30000, c: 3000, passed: [false, false, false], at: [null, null, null], running: false, anim: null };
+
+  function refreshLabels() {
+    $("coKsVal").textContent = coFmt(cos.ks) + " N/m (" + (cos.ks / 1000).toFixed(0) + " N/mm)";
+    $("coCVal").textContent = coFmt(cos.c) + " N-s/m";
+  }
+  $("coKs").addEventListener("input", function (e) { cos.ks = +e.target.value; refreshLabels(); });
+  $("coC").addEventListener("input", function (e) { cos.c = +e.target.value; refreshLabels(); });
+  function preset(ks, c, nm) {
+    cos.ks = ks; cos.c = c;
+    $("coKs").value = ks; $("coC").value = c;
+    refreshLabels();
+    toast(nm + " loaded: " + coFmt(ks) + " N/m, " + coFmt(c) + " N-s/m");
+  }
+  $("coPComfort").addEventListener("click", function () { preset(14000, 1000, "Comfort"); });
+  $("coPSport").addEventListener("click", function () { preset(20000, 1800, "Sport"); });
+  $("coPTrack").addEventListener("click", function () { preset(45000, 6500, "Track"); });
+
+  for (var i = 0; i < 3; i++) {
+    (function (ti) {
+      $("coRun" + ti).addEventListener("click", function () { coRunTrial(ti); });
+    })(i);
+  }
+
+  $("coClose").addEventListener("click", function () {
+    if (cos.anim) { cancelAnimationFrame(cos.anim); cos.anim = null; }
+    cos.running = false;
+    $("coLabOverlay").classList.remove("open");
+  });
+  $("coSheetBtn").addEventListener("click", coCertificate);
+  refreshLabels();
+}
+
+function coRunTrial(ti) {
+  if (cos.running) return;
+  cos.running = true;
+  for (var i = 0; i < 3; i++) $("coRun" + i).disabled = true;
+  var res;
+  try {
+    res = coSim(cos.ks, cos.c, ti);
+  } catch (e) {
+    cos.running = false;
+    for (var k = 0; k < 3; k++) $("coRun" + k).disabled = false;
+    $("coResult").className = "co-result fail";
+    $("coResult").textContent = "The rig threw a rod (simulation error). Try different settings.";
+    return;
+  }
+  var tr = CO_TRIALS[ti];
+  var dur = 3.4;
+  var t0 = performance.now();
+  var canvas = $("coCanvas");
+  function frame(now) {
+    var t = Math.min((now - t0) / 1000 / dur, 1) * tr.T;
+    var idx = Math.min(Math.floor(t / res.dtSamp), res.samples.length - 1);
+    var smp = res.samples[idx];
+    coDraw(t, smp, res, tr);
+    if (t < tr.T) {
+      cos.anim = requestAnimationFrame(frame);
+    } else {
+      cos.anim = null;
+      cos.running = false;
+      for (var j = 0; j < 3; j++) $("coRun" + j).disabled = false;
+      coFinishTrial(ti, res);
+    }
+  }
+  cos.anim = requestAnimationFrame(frame);
+  $("coResult").className = "co-result";
+  $("coResult").textContent = "Running " + tr.name + " at " + coFmt(cos.ks) + " N/m, " + coFmt(cos.c) + " N-s/m...";
+}
+
+function coFinishTrial(ti, res) {
+  var badge = $("coBadge" + ti);
+  if (res.pass) {
+    cos.passed[ti] = true;
+    cos.at[ti] = { ks: cos.ks, c: cos.c };
+    badge.className = "badge pass";
+    badge.textContent = "PASSED";
+    $("coResult").className = "co-result win";
+    var txt = CO_TRIALS[ti].name + " PASSED at " + coFmt(cos.ks) + " N/m, " + coFmt(cos.c) + " N-s/m. ";
+    txt += "Peak cabin accel " + res.maxAcc.toFixed(2) + " m/s^2, travel " + Math.round(res.maxTravel * 1000) + " mm";
+    if (CO_TRIALS[ti].kind === "wash") txt += ", RMS accel " + res.rmsAcc.toFixed(2) + " m/s^2";
+    else txt += ", settle " + res.settle.toFixed(2) + " s";
+    txt += ".";
+    $("coResult").textContent = txt;
+    toast(CO_TRIALS[ti].name + " passed");
+  } else {
+    badge.className = "badge fail";
+    badge.textContent = "FAILED";
+    $("coResult").className = "co-result fail";
+    var hint = coHint(res.fails);
+    $("coResult").textContent = CO_TRIALS[ti].name + " FAILED: " + res.fails.join("; ") + ". " + hint;
+    toast("Trial failed");
+  }
+  if (cos.passed[0] && cos.passed[1] && cos.passed[2]) {
+    $("coSheetBtn").disabled = false;
+    $("coResult").textContent += " ALL THREE TRIALS PASSED. The bench will sign your setup sheet.";
+  }
+}
+
+function coDraw(t, smp, res, tr) {
+  var cv = $("coCanvas");
+  if (!cv) return;
+  var dpr = window.devicePixelRatio || 1;
+  var w = cv.clientWidth, h = 240;
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  var g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = "#060b0c";
+  g.fillRect(0, 0, w, h);
+
+  var SY = 300; /* px per meter, vertical */
+  var wheelX = w * 0.34;
+  var roadBase = h - 44;
+  var wheelR = 30;
+  var zs = smp ? smp[0] : 0, zu = smp ? smp[1] : 0;
+
+  /* road surface, scrolling */
+  if (tr && smp) {
+    g.beginPath();
+    g.moveTo(0, h);
+    var pxm = 46;
+    for (var x = 0; x <= w; x += 6) {
+      var tAt = t - (x - wheelX) / pxm / tr.v;
+      var ry = roadBase - tr.road(tAt < 0 ? 0 : tAt) * SY;
+      g.lineTo(x, ry);
+    }
+    g.lineTo(w, h);
+    g.closePath();
+    g.fillStyle = "#101a1b";
+    g.fill();
+    g.strokeStyle = "#2a3a3c";
+    g.lineWidth = 1;
+    g.stroke();
+  } else {
+    g.fillStyle = "#101a1b";
+    g.fillRect(0, roadBase, w, h - roadBase);
+  }
+
+  var wy = roadBase - wheelR - zu * SY;
+  var bodyW = 170, bodyH = 46;
+  var by = wy - 96 - zs * SY + zu * 0; /* body rides on its own offset */
+  by = roadBase - wheelR - 96 - zs * SY;
+
+  /* spring: zigzag between body and wheel */
+  var topY = by + bodyH, botY = wy - wheelR;
+  var cx = wheelX;
+  g.strokeStyle = "#9dff57";
+  g.lineWidth = 3;
+  g.beginPath();
+  var coils = 7, yy;
+  g.moveTo(cx - 26, topY);
+  g.lineTo(cx - 26, topY + 6);
+  for (var cI = 0; cI <= coils; cI++) {
+    yy = topY + 6 + (botY - topY - 12) * (cI / coils);
+    g.lineTo(cx + (cI % 2 ? 16 : -16), yy);
+  }
+  g.lineTo(cx + 26, botY - 6);
+  g.lineTo(cx + 26, botY);
+  g.stroke();
+  /* damper */
+  g.strokeStyle = "#39d7ff";
+  g.lineWidth = 5;
+  var dx = wheelX + 44;
+  g.beginPath();
+  g.moveTo(dx, topY);
+  g.lineTo(dx, (topY + botY) / 2);
+  g.stroke();
+  g.fillStyle = "#39d7ff";
+  g.fillRect(dx - 8, (topY + botY) / 2 - 4, 16, 8);
+  g.strokeStyle = "#39d7ff";
+  g.lineWidth = 5;
+  g.beginPath();
+  g.moveTo(dx, (topY + botY) / 2 + 4);
+  g.lineTo(dx, botY);
+  g.stroke();
+
+  /* wheel */
+  g.beginPath();
+  g.arc(wheelX, wy, wheelR, 0, Math.PI * 2);
+  g.fillStyle = "#1a2425";
+  g.fill();
+  g.strokeStyle = "#7c8d89";
+  g.lineWidth = 2;
+  g.stroke();
+  g.beginPath();
+  g.arc(wheelX, wy, 10, 0, Math.PI * 2);
+  g.fillStyle = "#39494b";
+  g.fill();
+
+  /* body */
+  g.fillStyle = "#14201f";
+  g.strokeStyle = "#9dff57";
+  g.lineWidth = 1.5;
+  var bx = wheelX - bodyW / 2;
+  g.beginPath();
+  g.rect(bx, by, bodyW, bodyH);
+  g.fill();
+  g.stroke();
+  g.fillStyle = "#9dff57";
+  g.font = "10px monospace";
+  g.fillText("380 KG", bx + 8, by + 18);
+  g.fillStyle = "#39d7ff";
+  g.fillText("COIL-OVER RIG", bx + 8, by + 34);
+
+  /* live telemetry */
+  if (smp && res) {
+    var idxT = Math.min(Math.floor(t / res.dtSamp), res.samples.length - 1);
+    var sNow = res.samples[idxT];
+    var accNow = 0;
+    if (idxT > 1) {
+      var vNow = (res.samples[idxT][0] - res.samples[idxT - 1][0]) / res.dtSamp;
+      var vPrev = (res.samples[idxT - 1][0] - res.samples[idxT - 2][0]) / res.dtSamp;
+      accNow = (vNow - vPrev) / res.dtSamp;
+    }
+    var travNow = Math.abs(sNow[0] - sNow[1]);
+    var tireNow = CO_KT * (sNow[2] - sNow[1]);
+    var elA = $("coTelAcc"), elT = $("coTelTrav"), elC = $("coTelTire");
+    if (elA) {
+      elA.textContent = Math.abs(accNow).toFixed(2) + " m/s^2";
+      elA.className = Math.abs(accNow) > CO_ACC_MAX ? "bad" : "";
+    }
+    if (elT) {
+      elT.textContent = Math.round(travNow * 1000) + " mm";
+      elT.className = travNow > CO_TRAVEL_MAX ? "bad" : "";
+    }
+    if (elC) {
+      elC.textContent = tireNow > CO_TIRE_MIN ? "planted" : "AIRBORNE";
+      elC.className = tireNow > CO_TIRE_MIN ? "" : "bad";
+    }
+  }
+}
+
+function coCertificate() {
+  if (!(cos.passed[0] && cos.passed[1] && cos.passed[2])) return;
+  var v = (typeof currentInvention === "function") ? currentInvention() : null;
+  var nm = v ? v.name : "unnamed prototype";
+  var code = v ? v.code : "n/a";
+  var lines = cos.at.map(function (a, i) {
+    return "  " + CO_TRIALS[i].name + ": " + coFmt(a.ks) + " N/m, " + coFmt(a.c) + " N-s/m";
+  });
+  var txt =
+    "COIL-OVER LAB SETUP SHEET\n" +
+    "Garage Inventions Suspension Bench\n" +
+    "==================================\n" +
+    "Invention : " + nm + " (" + code + ")\n" +
+    "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+    "Result    : ALL THREE ROAD TRIALS PASSED\n" +
+    "Winning setups:\n" + lines.join("\n") + "\n" +
+    "\nLimits held: damper travel under 100 mm, peak cabin accel under\n" +
+    "5.5 m/s^2 on bumps, settle under 1.8 s, washboard RMS under\n" +
+    "2.6 m/s^2, tires planted throughout.\n" +
+    "\nSigned by the bench. The road does not grade on a curve.\n";
+  var blob = new Blob([txt], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "coilover-setup-sheet.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast("Setup sheet downloaded");
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", coBuild);
+} else {
+  coBuild();
+}
+
 })();

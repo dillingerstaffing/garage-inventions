@@ -142,5 +142,21 @@
     "power": "Runs on curiosity and a 16 millisecond timer. Idle draw is zero because it refuses to idle.",
     "failure": "A missing ecall halt will let the program wander off the end of memory, where it will be arrested by the trap handler and held without bail.",
     "transcript": "The first apprentice put 42 in a0 on the second try and has not stopped talking about it. The second apprentice stored <strong>0xCAFE</strong> at address 0x100 and now refers to himself as the Memory Courier in third person. The jar is getting full."
+  },
+  {
+    "names": [
+      "Damper Diviner",
+      "Spring Rate Sommelier",
+      "Washboard Whisperer"
+    ],
+    "purposes": [
+      "Reads damper dyno curves the way other people read horoscopes, and is right about as often, which is to say always.",
+      "Pairs spring rates with road surfaces the way a sommelier pairs wine with dinner, except the dinner is a pothole.",
+      "Listens to corrugated gravel and can tell you the damping coefficient to within 200 N-s/m, or your money back."
+    ],
+    "built": "A quarter-car rig, a laptop with strong opinions about RK4 integration, and a whiteboard that says SETTLE TIME in all caps.",
+    "power": "Runs on coffee and the righteous certainty that 1.8 seconds is enough for anyone.",
+    "failure": "An over-stiffened track tune can launch a coffee mug clear across the shop, where it will be invoiced as a ballistic test.",
+    "transcript": "Trial two passed at 20,000 N/m. <strong>The pothole has been formally forgiven.</strong> Trial three remains under review."
   }
 ]
