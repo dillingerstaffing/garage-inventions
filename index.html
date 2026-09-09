@@ -748,6 +748,22 @@
   "failure": "The smoke machine once set off the shop fire alarm during a low-speed run, and the resulting evacuation was logged as a successful abort test.",
   "transcript": "Carrier approach held 3.0 degrees of margin at 30 m/s. <strong>The tufts remained attached, which is more than can be said for the operator's composure.</strong>"
 },
+{
+  "names": [
+    "Sling Length Auditor",
+    "Counterweight Therapist",
+    "Parapet Persuader"
+  ],
+  "purposes": [
+    "Measures your sling against your actual sling and bills you for the difference.",
+    "Convinces the counterweight that falling is a career move, then documents the descent.",
+    "Negotiates with the far parapet by mail, and the mail is a rock."
+  ],
+  "built": "A torsion skein, three hundred meters of suspicious rope, a protractor with trust issues, and a rock collection with seniority.",
+  "power": "Runs on twisted rope and the quiet confidence that gravity always shows up for work.",
+  "failure": "The sling once released early during a calibration dinner and the centerpiece achieved a range of eleven meters, which the log recorded as catering.",
+  "transcript": "Release pin set to 45 degrees, stone mass 3 kg, wind calm. <strong>The rock arrived before the paperwork, which is the entire point of the machine.</strong>"
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -5407,6 +5423,707 @@ if (document.readyState === "loading") {
 } else {
   dyBuild();
 }
+
+/* ============================================================
+   13. THE MANGONEL RANGE: torsion siege-engine bench (playable)
+   A rope-skein stone thrower on the range. Tune the skein
+   preload, arm length, sling length, stone mass, and release
+   pin, then loose three trials: a max-range throw in calm air,
+   a precision shot at the 80 m stake in shifting wind, and a
+   three-stone siege-train volley. Over-wound short arms shear
+   at the pivot; long slings plow the field; weak skeins cannot
+   lift the stone. All flight is integrated live with quadratic
+   drag, so the animation is the physics, not a cartoon of it.
+   Fully self-contained: defines its own helpers, touches
+   nothing else in this file.
+   MANGONEL-RANGE-BENCH-13
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- physics ---------- */
+  var MG_G = 9.81;
+  var MG_RHO = 1.225;
+  var MG_CD = 0.47;
+  var MG_STONE_RHO = 2700;
+  var MG_PIVOT_H = 1.2;
+  var MG_THETA0 = -60 * Math.PI / 180;      /* cocked arm angle */
+  var MG_THETA_STOP = 55 * Math.PI / 180;   /* crossbar stop angle */
+  var MG_K = 5.5;                            /* skein energy, J per turn^2 */
+  var MG_EFF = 0.82;                         /* swing efficiency */
+  var MG_SHEAR = 1400;                       /* J per m of arm: shear limit */
+  var MG_TARGET = 80;                        /* stake distance, m */
+
+  function mgStoneRadius(m) { return Math.pow(3 * m / (4 * Math.PI * MG_STONE_RHO), 1 / 3); }
+
+  /* Full shot model. Returns {fail:"drag"|"shear"|"weak"} or
+     {fail:null, range, v0, x0, y0, lamDeg, k, wind}. */
+  function mgSim(N, L, S, mp, lamDeg, wind) {
+    if (S > 0.6 * L) return { fail: "drag" };
+    var E = MG_K * N * N;
+    var armMass = 6 + 1.5 * L;
+    if (E / L > MG_SHEAR) return { fail: "shear" };
+    var rEff = L + S;
+    var iArm = (1 / 3) * armMass * L * L;
+    var iTot = iArm + mp * rEff * rEff;
+    var dPE = MG_G * (armMass * L / 2 + mp * rEff) *
+      (Math.sin(MG_THETA_STOP) - Math.sin(MG_THETA0));
+    if (E <= dPE) return { fail: "weak" };
+    var omega = Math.sqrt(2 * MG_EFF * (E - dPE) / iTot);
+    var v = omega * rEff;
+    var lam = lamDeg * Math.PI / 180;
+    var x0 = L * Math.cos(MG_THETA_STOP) + S * Math.cos(lam);
+    var y0 = MG_PIVOT_H + L * Math.sin(MG_THETA_STOP) + S * Math.sin(lam);
+    var r = mgStoneRadius(mp);
+    var k = 0.5 * MG_RHO * MG_CD * Math.PI * r * r / mp;
+    var x = x0, y = y0;
+    var vx = v * Math.cos(lam), vy = v * Math.sin(lam);
+    var dt = 0.004, t = 0;
+    while (y > 0 && t < 40) {
+      var rvx = vx - wind, rvy = vy;
+      var sp = Math.sqrt(rvx * rvx + rvy * rvy);
+      vx -= k * sp * rvx * dt;
+      vy -= (MG_G + k * sp * rvy) * dt;
+      x += vx * dt; y += vy * dt; t += dt;
+    }
+    return { fail: null, range: x, v0: v, x0: x0, y0: y0, lamDeg: lamDeg, k: k, wind: wind };
+  }
+
+  function mgFrameLoad(N, L) { return MG_K * N * N / L / MG_SHEAR; }
+
+  var MG_FAIL_MSG = {
+    drag: "Sling drag: the stone plows the field. The sling must stay under 60 percent of the arm.",
+    shear: "Structural failure: the arm shears at the pivot. Less preload, or a longer arm to spread the load.",
+    weak: "The skein cannot lift the stone. More preload, a longer arm, or a lighter stone."
+  };
+
+  /* ---------- tiny local helpers (no reliance on page globals) ---------- */
+  function mg$(id) { return document.getElementById(id); }
+  function mgEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function mgToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = mg$("toast") || mg$("mgToast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function mgFmt(n, d) { return Number(n).toFixed(d == null ? 1 : d); }
+
+  /* ---------- trials ---------- */
+  var MG_TRIALS = [
+    {
+      name: "Trial 1: The Far Field",
+      desc: "One throw, dead calm air. Clear 120 m. Long arms forgive heavy preloads; light stones fly farthest.",
+      judge: function (s) { return s.range >= 120; }
+    },
+    {
+      name: "Trial 2: The Keep Gate",
+      desc: "One stone at the 80 m stake, within 5 m. The flag shows the wind for your next shot: read it, compensate, loose.",
+      judge: function (s) { return Math.abs(s.range - MG_TARGET) <= 5; }
+    },
+    {
+      name: "Trial 3: The Siege Train",
+      desc: "A three-stone volley at the 80 m stake. Every stone must land within 8 m, with fresh wind per stone and no broken machinery.",
+      judge: function (shots) {
+        for (var i = 0; i < shots.length; i++) {
+          if (shots[i].fail || Math.abs(shots[i].range - MG_TARGET) > 8) return false;
+        }
+        return true;
+      }
+    }
+  ];
+
+  /* ---------- state ---------- */
+  var mg = {
+    built: false,
+    animating: false,
+    raf: 0,
+    badges: [null, null, null],
+    wins: [],
+    best: 0,
+    nextWind: 0,
+    view: { xMax: 120, theta: MG_THETA0, flights: [], landed: [] },
+    lastShots: []
+  };
+
+  function mgRollWind() {
+    mg.nextWind = Math.round((Math.random() * 16 - 8) * 10) / 10;
+  }
+
+  function mgParams() {
+    return {
+      N: parseFloat(mg$("mgN").value),
+      L: parseFloat(mg$("mgL").value),
+      S: parseFloat(mg$("mgS").value),
+      mp: parseFloat(mg$("mgM").value),
+      lam: parseFloat(mg$("mgLam").value)
+    };
+  }
+
+  function mgWindText(w) {
+    if (Math.abs(w) < 0.05) return "calm";
+    return (w > 0 ? "+" : "") + mgFmt(w, 1) + " m/s " + (w > 0 ? "tailwind" : "headwind");
+  }
+
+  /* ---------- build ---------- */
+  function mgBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || mg$("mgBtn")) return;
+
+    var css = [
+      ".mg-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".mg-overlay.open{display:flex;}",
+      ".mg-panel{width:min(900px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+      ".mg-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".mg-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+      ".mg-sliders{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;}",
+      ".mg-ctl{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+      ".mg-ctl h6{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+      ".mg-ctl .val{font-family:monospace;font-size:13px;color:var(--ink);margin-bottom:6px;}",
+      ".mg-ctl input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+      ".mg-pred{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".mg-pred .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+      ".mg-pred .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".mg-pred .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+      ".mg-pred .t p.warn{color:var(--orange);}",
+      ".mg-pred .t p.bad{color:#ff8ba0;}",
+      ".mg-pred .t p.good{color:var(--acid);}",
+      ".mg-trials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".mg-trial{border:1px solid var(--line);padding:10px;background:var(--panel-2);display:flex;flex-direction:column;gap:8px;min-width:0;}",
+      ".mg-trial h5{margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+      ".mg-trial p{margin:0;font-size:11px;color:var(--ink);line-height:1.6;flex:1;}",
+      ".mg-trial .badge{font-family:monospace;font-size:11px;padding:4px 8px;border:1px solid var(--line);color:#72827f;text-align:center;}",
+      ".mg-trial .badge.pass{border-color:var(--acid);color:var(--acid);}",
+      ".mg-trial .badge.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".mg-trial button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--orange);color:var(--orange);}",
+      ".mg-trial button:disabled{opacity:.35;cursor:default;}",
+      ".mg-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;position:relative;}",
+      ".mg-stage canvas{display:block;width:100%;height:270px;}",
+      ".mg-tel{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".mg-tel .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+      ".mg-tel .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".mg-tel .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+      ".mg-result{padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;}",
+      ".mg-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".mg-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".mg-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+      ".mg-foot .secondary{flex:1;min-height:44px;}",
+      "@media (max-width:640px){.mg-sliders{grid-template-columns:1fr;}.mg-trials{grid-template-columns:1fr;}.mg-pred{grid-template-columns:repeat(2,minmax(0,1fr));}.mg-tel{grid-template-columns:repeat(2,minmax(0,1fr));}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = mgEl("button", "secondary", "Open the Mangonel Range");
+    b.id = "mgBtn";
+    b.addEventListener("click", function () {
+      mg$("mgOverlay").classList.add("open");
+      mgRollWind();
+      mgSizeCanvas();
+      mgRefresh();
+      mgDrawIdle();
+    });
+    box.appendChild(b);
+
+    var trialsHtml = MG_TRIALS.map(function (tr, i) {
+      return '<div class="mg-trial"><h5>' + tr.name + '</h5><p>' + tr.desc + '</p>' +
+        '<div class="badge" id="mgBadge' + i + '">not run</div>' +
+        '<button id="mgRun' + i + '">Loose</button></div>';
+    }).join("");
+
+    var ov = mgEl("div", "mg-overlay");
+    ov.id = "mgOverlay";
+    ov.innerHTML =
+      '<div class="mg-panel" role="dialog" aria-label="The Mangonel Range torsion siege engine bench">' +
+      "<h3>The Mangonel Range</h3>" +
+      '<p class="mg-sub">A rope-skein stone thrower on the range. Twist the skein, rig the arm, set the release pin, and loose. Trial 1 is dead calm; trials 2 and 3 read the flag, because the wind is always personal.</p>' +
+      '<div class="mg-sliders">' +
+      '<div class="mg-ctl"><h6>Skein preload</h6><div class="val" id="mgNVal"></div>' +
+      '<input type="range" id="mgN" min="5" max="30" step="1" value="24" aria-label="Skein preload in turns"></div>' +
+      '<div class="mg-ctl"><h6>Arm length</h6><div class="val" id="mgLVal"></div>' +
+      '<input type="range" id="mgL" min="2" max="5" step="0.25" value="4.5" aria-label="Arm length in meters"></div>' +
+      '<div class="mg-ctl"><h6>Sling length</h6><div class="val" id="mgSVal"></div>' +
+      '<input type="range" id="mgS" min="0.5" max="2.5" step="0.25" value="2" aria-label="Sling length in meters"></div>' +
+      '<div class="mg-ctl"><h6>Stone mass</h6><div class="val" id="mgMVal"></div>' +
+      '<input type="range" id="mgM" min="2" max="20" step="1" value="3" aria-label="Stone mass in kilograms"></div>' +
+      '<div class="mg-ctl"><h6>Release pin</h6><div class="val" id="mgLamVal"></div>' +
+      '<input type="range" id="mgLam" min="20" max="60" step="1" value="45" aria-label="Release pin angle in degrees"></div>' +
+      '<div class="mg-ctl"><h6>Flag wind (next shot)</h6><div class="val" id="mgWindVal">calm</div>' +
+      '<div class="val" style="color:#7c8d89;font-size:11px;">Trial 1 always flies in calm air.</div></div>' +
+      "</div>" +
+      '<div class="mg-pred">' +
+      '<div class="t"><h6>Release velocity</h6><p id="mgPredV">--</p></div>' +
+      '<div class="t"><h6>Predicted range</h6><p id="mgPredR">--</p></div>' +
+      '<div class="t"><h6>Frame load</h6><p id="mgLoad">--</p></div>' +
+      '<div class="t"><h6>Range warning</h6><p id="mgWarn">--</p></div>' +
+      "</div>" +
+      '<div class="mg-trials">' + trialsHtml + "</div>" +
+      '<div class="mg-stage"><canvas id="mgCanvas"></canvas></div>' +
+      '<div class="mg-tel">' +
+      '<div class="t"><h6>Release vel.</h6><p id="mgTelV">--</p></div>' +
+      '<div class="t"><h6>Launch angle</h6><p id="mgTelLam">--</p></div>' +
+      '<div class="t"><h6>Range</h6><p id="mgTelR">--</p></div>' +
+      '<div class="t"><h6>Miss vs 80 m</h6><p id="mgTelMiss">--</p></div>' +
+      '<div class="t"><h6>Wind</h6><p id="mgTelWind">--</p></div>' +
+      "</div>" +
+      '<div class="mg-result" id="mgResult">Rig the machine and loose a trial. The range is patient; the stake is not.</div>' +
+      '<div class="mg-foot">' +
+      '<button class="secondary" id="mgCertBtn" disabled>Download range certificate</button>' +
+      '<button class="secondary" id="mgClose">Close the range</button>' +
+      "</div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    ["mgN", "mgL", "mgS", "mgM", "mgLam"].forEach(function (id) {
+      mg$(id).addEventListener("input", mgRefresh);
+    });
+    mg$("mgRun0").addEventListener("click", function () { mgFire(0); });
+    mg$("mgRun1").addEventListener("click", function () { mgFire(1); });
+    mg$("mgRun2").addEventListener("click", function () { mgFire(2); });
+    mg$("mgClose").addEventListener("click", function () {
+      mgStopAnim();
+      mg$("mgOverlay").classList.remove("open");
+    });
+    mg$("mgCertBtn").addEventListener("click", mgCert);
+    window.addEventListener("resize", mgSizeCanvas);
+    mg.built = true;
+  }
+
+  /* ---------- prediction / readouts ---------- */
+  function mgRefresh() {
+    var p = mgParams();
+    mg$("mgNVal").textContent = p.N + " turns";
+    mg$("mgLVal").textContent = mgFmt(p.L, 2) + " m";
+    mg$("mgSVal").textContent = mgFmt(p.S, 2) + " m";
+    mg$("mgMVal").textContent = mgFmt(p.mp, 0) + " kg";
+    mg$("mgLamVal").textContent = mgFmt(p.lam, 0) + " deg";
+    mg$("mgWindVal").textContent = mgWindText(mg.nextWind);
+
+    var shot = mgSim(p.N, p.L, p.S, p.mp, p.lam, mg.nextWind);
+    var vEl = mg$("mgPredV"), rEl = mg$("mgPredR"),
+        lEl = mg$("mgLoad"), wEl = mg$("mgWarn");
+    if (shot.fail) {
+      vEl.textContent = "--"; rEl.textContent = "--";
+      lEl.textContent = Math.round(mgFrameLoad(p.N, p.L) * 100) + " %";
+      lEl.className = mgFrameLoad(p.N, p.L) > 1 ? "bad" : "";
+      wEl.textContent = MG_FAIL_MSG[shot.fail];
+      wEl.className = "bad";
+    } else {
+      vEl.textContent = mgFmt(shot.v0, 1) + " m/s";
+      rEl.textContent = mgFmt(shot.range, 1) + " m";
+      var load = mgFrameLoad(p.N, p.L);
+      lEl.textContent = Math.round(load * 100) + " %";
+      lEl.className = load > 0.85 ? "warn" : "good";
+      wEl.textContent = p.S > 0.5 * p.L
+        ? "Sling is getting long for this arm."
+        : (load > 0.85 ? "Frame is near its shear limit." : "Rig looks sound.");
+      wEl.className = (p.S > 0.5 * p.L || load > 0.85) ? "warn" : "good";
+    }
+    mg.view.xMax = Math.max(110, (shot.fail ? 110 : shot.range) * 1.15);
+    if (!mg.animating) mgDrawIdle();
+  }
+
+  /* ---------- canvas ---------- */
+  var mgCtx = null, mgW = 0, mgH = 0, mgDpr = 1;
+
+  function mgSizeCanvas() {
+    var c = mg$("mgCanvas");
+    if (!c) return;
+    mgDpr = window.devicePixelRatio || 1;
+    mgW = c.clientWidth; mgH = c.clientHeight;
+    c.width = Math.max(1, Math.round(mgW * mgDpr));
+    c.height = Math.max(1, Math.round(mgH * mgDpr));
+    mgCtx = c.getContext("2d");
+    if (!mg.animating) mgDrawIdle();
+  }
+
+  function mgScale() {
+    var x0 = 56, x1 = mgW - 18;
+    return { x0: x0, s: (x1 - x0) / mg.view.xMax, gy: mgH - 30 };
+  }
+
+  function mgDrawMachine(ctx, sc, theta, slingLag) {
+    var px = sc.x0, py = sc.gy - MG_PIVOT_H * sc.s;
+    var m = sc.s; /* px per meter */
+    ctx.strokeStyle = "#8a6f4d"; ctx.lineWidth = 5; ctx.lineCap = "round";
+    /* A-frame legs */
+    ctx.beginPath();
+    ctx.moveTo(px - 0.9 * m, sc.gy); ctx.lineTo(px, py);
+    ctx.moveTo(px + 0.9 * m, sc.gy); ctx.lineTo(px, py);
+    ctx.stroke();
+    /* base rail */
+    ctx.strokeStyle = "#5d4c36"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(px - 1.4 * m, sc.gy); ctx.lineTo(px + 1.4 * m, sc.gy); ctx.stroke();
+    /* skein bundle */
+    ctx.fillStyle = "#a8875a";
+    ctx.beginPath(); ctx.arc(px, sc.gy - 0.35 * m, 0.28 * m, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#6b5638"; ctx.lineWidth = 2;
+    for (var i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(px - 0.28 * m, sc.gy - 0.35 * m + i * 0.1 * m);
+      ctx.lineTo(px + 0.28 * m, sc.gy - 0.35 * m + i * 0.1 * m);
+      ctx.stroke();
+    }
+    /* arm */
+    var p = mgParams();
+    var ax = px + Math.cos(theta) * p.L * m, ay = py - Math.sin(theta) * p.L * m;
+    ctx.strokeStyle = "#c9a86a"; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ax, ay); ctx.stroke();
+    /* pivot */
+    ctx.fillStyle = "#e8e4da";
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+    /* crossbar stop */
+    var sx = px + Math.cos(MG_THETA_STOP) * (p.L + 0.4) * m,
+        sy = py - Math.sin(MG_THETA_STOP) * (p.L + 0.4) * m;
+    ctx.strokeStyle = "#ff6b4a"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(sx - 6, sy - 6); ctx.lineTo(sx + 6, sy + 6); ctx.stroke();
+    /* sling + stone while cocked/swinging */
+    var sa = theta - slingLag;
+    var ex = ax + Math.cos(sa) * p.S * m, ey = ay - Math.sin(sa) * p.S * m;
+    ctx.strokeStyle = "#d8cfb8"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.fillStyle = "#b9b2a0";
+    ctx.beginPath(); ctx.arc(ex, ey, 6, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function mgDrawScene(ctx, sc, wind) {
+    var i, x, lx;
+    /* ground */
+    ctx.strokeStyle = "#2c3a38"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, sc.gy); ctx.lineTo(mgW, sc.gy); ctx.stroke();
+    /* distance markers */
+    ctx.fillStyle = "#5f726e"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+    for (i = 20; i <= mg.view.xMax; i += 20) {
+      x = sc.x0 + i * sc.s;
+      ctx.strokeStyle = "#22302e"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, sc.gy); ctx.lineTo(x, sc.gy - 8); ctx.stroke();
+      ctx.fillText(i + " m", x, sc.gy + 14);
+    }
+    /* target stake at 80 m */
+    x = sc.x0 + MG_TARGET * sc.s;
+    ctx.strokeStyle = "#7c8d89"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x, sc.gy); ctx.lineTo(x, sc.gy - 26); ctx.stroke();
+    ctx.fillStyle = "#ff6b4a";
+    ctx.beginPath(); ctx.arc(x, sc.gy - 30, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ff6b4a"; ctx.font = "10px monospace";
+    ctx.fillText("80 m stake", x, sc.gy - 40);
+    /* 5 m gate band */
+    ctx.fillStyle = "rgba(255,107,74,.10)";
+    ctx.fillRect(sc.x0 + (MG_TARGET - 5) * sc.s, sc.gy - 4, 10 * sc.s, 4);
+    /* wind flag behind the machine */
+    var fx = sc.x0 - 3.2 * sc.s, fy = sc.gy - 2.6 * sc.s;
+    if (fx > 8) {
+      ctx.strokeStyle = "#7c8d89"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(fx, sc.gy); ctx.lineTo(fx, fy); ctx.stroke();
+      var fl = Math.min(34, 6 + Math.abs(wind) * 3.2);
+      var dir = wind >= 0 ? 1 : -1;
+      ctx.fillStyle = Math.abs(wind) < 0.05 ? "#3a4a47" : "#ffd166";
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(fx + dir * fl, fy + 6);
+      ctx.lineTo(fx, fy + 12);
+      ctx.closePath(); ctx.fill();
+    }
+    /* landed stones */
+    for (i = 0; i < mg.view.landed.length; i++) {
+      lx = sc.x0 + mg.view.landed[i] * sc.s;
+      ctx.fillStyle = "rgba(185,178,160,.85)";
+      ctx.beginPath(); ctx.ellipse(lx, sc.gy - 2, 7, 3, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#ff8ba0"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(lx - 5, sc.gy - 14); ctx.lineTo(lx + 5, sc.gy - 6);
+      ctx.moveTo(lx + 5, sc.gy - 14); ctx.lineTo(lx - 5, sc.gy - 6);
+      ctx.stroke();
+    }
+  }
+
+  function mgDrawIdle() {
+    if (!mgCtx) return;
+    var ctx = mgCtx;
+    ctx.setTransform(mgDpr, 0, 0, mgDpr, 0, 0);
+    ctx.clearRect(0, 0, mgW, mgH);
+    var sc = mgScale();
+    mgDrawScene(ctx, sc, mg.nextWind);
+    mgDrawMachine(ctx, sc, MG_THETA0, 0.9);
+  }
+
+  /* ---------- firing + animation ---------- */
+  function mgStopAnim() {
+    mg.animating = false;
+    if (mg.raf) { cancelAnimationFrame(mg.raf); mg.raf = 0; }
+  }
+
+  function mgSetRunning(on) {
+    mg.animating = on;
+    for (var i = 0; i < 3; i++) mg$("mgRun" + i).disabled = on;
+  }
+
+  function mgFire(trial) {
+    if (mg.animating) return;
+    var p = mgParams();
+    var shots, winds;
+    if (trial === 0) {
+      shots = [mgSim(p.N, p.L, p.S, p.mp, p.lam, 0)];
+      winds = [0];
+    } else if (trial === 1) {
+      shots = [mgSim(p.N, p.L, p.S, p.mp, p.lam, mg.nextWind)];
+      winds = [mg.nextWind];
+      mgRollWind();
+    } else {
+      winds = [mgRollWind0(), mgRollWind0(), mgRollWind0()];
+      shots = winds.map(function (w) { return mgSim(p.N, p.L, p.S, p.mp, p.lam, w); });
+      mgRollWind();
+    }
+    mg.lastShots = shots;
+    var broken = shots.some(function (s) { return s.fail; });
+    mgSetRunning(true);
+    mg$("mgResult").className = "mg-result";
+    mg$("mgResult").textContent = broken
+      ? "The crew steps back. Something is about to give."
+      : "Loose!";
+    mgRefresh();
+    mgAnimate(trial, shots, winds, broken);
+  }
+
+  function mgRollWind0() { return Math.round((Math.random() * 16 - 8) * 10) / 10; }
+
+  function mgAnimate(trial, shots, winds, broken) {
+    var ctx = mgCtx, sc = mgScale();
+    var okShots = shots.filter(function (s) { return !s.fail; });
+    var maxR = 0;
+    okShots.forEach(function (s) { if (s.range > maxR) maxR = s.range; });
+    mg.view.xMax = Math.max(110, maxR * 1.18, MG_TARGET * 1.25);
+    mg.view.landed = [];
+    mg.view.flights = okShots.map(function (s, i) {
+      return {
+        shot: s, delay: broken ? 0 : i * 0.7,
+        t: 0, done: false,
+        x: s.x0, y: s.y0,
+        vx: s.v0 * Math.cos(s.lamDeg * Math.PI / 180),
+        vy: s.v0 * Math.sin(s.lamDeg * Math.PI / 180),
+        trail: []
+      };
+    });
+
+    var swingT = 0, SWING_DUR = 0.7, last = performance.now();
+
+    function frame(now) {
+      if (!mg.animating) return;
+      var dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      ctx.setTransform(mgDpr, 0, 0, mgDpr, 0, 0);
+      ctx.clearRect(0, 0, mgW, mgH);
+      sc = mgScale();
+      mgDrawScene(ctx, sc, winds[0]);
+
+      if (broken) {
+        /* the machine fails at the crossbar: shake, then report */
+        swingT += dt;
+        var th = MG_THETA0 + (MG_THETA_STOP - MG_THETA0) * Math.min(1, swingT / SWING_DUR);
+        var jx = (Math.random() - 0.5) * 6 * Math.min(1, swingT * 3);
+        ctx.save();
+        ctx.translate(jx, 0);
+        mgDrawMachine(ctx, sc, th, 0.35);
+        ctx.restore();
+        if (swingT > 1.1) { mgFinish(trial, shots, winds); return; }
+        mg.raf = requestAnimationFrame(frame);
+        return;
+      }
+
+      /* swing phase, then staggered flights */
+      if (swingT < SWING_DUR) {
+        swingT += dt;
+        var k2 = Math.min(1, swingT / SWING_DUR);
+        var e2 = 1 - Math.pow(1 - k2, 3);
+        mgDrawMachine(ctx, sc, MG_THETA0 + (MG_THETA_STOP - MG_THETA0) * e2, 0.9 - 0.55 * e2);
+      } else {
+        mgDrawMachine(ctx, sc, MG_THETA_STOP, 0.35);
+        var allDone = true;
+        mg.view.flights.forEach(function (f) {
+          if (f.delay > 0) { f.delay -= dt; allDone = false; return; }
+          if (!f.done) {
+            allDone = false;
+            var sub = dt, h = 1 / 240;
+            while (sub > 0 && !f.done) {
+              var st = Math.min(h, sub);
+              var rvx = f.vx - f.shot.wind, rvy = f.vy;
+              var sp = Math.sqrt(rvx * rvx + rvy * rvy);
+              f.vx -= f.shot.k * sp * rvx * st;
+              f.vy -= (MG_G + f.shot.k * sp * rvy) * st;
+              f.x += f.vx * st; f.y += f.vy * st; f.t += st; sub -= st;
+              if (f.y <= 0) { f.done = true; f.x = f.shot.range; f.y = 0; }
+            }
+            f.trail.push([f.x, f.y]);
+            if (f.trail.length > 400) f.trail.shift();
+          }
+        });
+        /* draw trails + stones */
+        mg.view.flights.forEach(function (f, fi) {
+          if (f.delay > 0 || f.trail.length < 2) return;
+          var cols = ["#ffd166", "#7ce8c4", "#ff8ba0"];
+          ctx.strokeStyle = cols[fi % 3];
+          ctx.lineWidth = 2;
+          ctx.globalAlpha = 0.85;
+          ctx.beginPath();
+          for (var i = 0; i < f.trail.length; i++) {
+            var tx = sc.x0 + f.trail[i][0] * sc.s,
+                ty = sc.gy - f.trail[i][1] * sc.s;
+            if (i === 0) ctx.moveTo(tx, ty); else ctx.lineTo(tx, ty);
+          }
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          if (!f.done) {
+            ctx.fillStyle = "#e8e4da";
+            ctx.beginPath();
+            ctx.arc(sc.x0 + f.x * sc.s, sc.gy - f.y * sc.s, 5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+        if (allDone && mg.view.flights.length) {
+          mg.view.flights.forEach(function (f) {
+            if (mg.view.landed.indexOf(f.shot.range) < 0) mg.view.landed.push(f.shot.range);
+          });
+          mgDrawScene(ctx, sc, winds[0]);
+          mgFinish(trial, shots, winds);
+          return;
+        }
+      }
+      mg.raf = requestAnimationFrame(frame);
+    }
+    mg.raf = requestAnimationFrame(frame);
+  }
+
+  /* ---------- judging + telemetry ---------- */
+  function mgSetBadge(i, pass) {
+    var b = mg$("mgBadge" + i);
+    b.textContent = pass ? "passed" : "failed";
+    b.className = "badge " + (pass ? "pass" : "fail");
+    mg.badges[i] = pass;
+    if (mg.badges[0] && mg.badges[1] && mg.badges[2]) {
+      mg$("mgCertBtn").disabled = false;
+      mgToast("All three trials passed. The range will sign your certificate.");
+    }
+  }
+
+  function mgCfgText(p) {
+    return p.N + " turns, arm " + mgFmt(p.L, 2) + " m, sling " + mgFmt(p.S, 2) +
+      " m, stone " + mgFmt(p.mp, 0) + " kg, pin " + mgFmt(p.lam, 0) + " deg";
+  }
+
+  function mgFinish(trial, shots, winds) {
+    mgSetRunning(false);
+    mgStopAnim();
+    var p = mgParams();
+    var res = mg$("mgResult");
+    var tel = function (s, w) {
+      mg$("mgTelV").textContent = s.fail ? "--" : mgFmt(s.v0, 1) + " m/s";
+      mg$("mgTelLam").textContent = s.fail ? "--" : mgFmt(s.lamDeg, 0) + " deg";
+      mg$("mgTelR").textContent = s.fail ? "--" : mgFmt(s.range, 1) + " m";
+      mg$("mgTelMiss").textContent = s.fail ? "--" :
+        (s.range >= MG_TARGET ? "+" : "") + mgFmt(s.range - MG_TARGET, 1) + " m";
+      mg$("mgTelWind").textContent = mgWindText(w);
+    };
+
+    if (shots[0].fail) {
+      tel(shots[0], winds[0]);
+      res.className = "mg-result fail";
+      res.textContent = MG_FAIL_MSG[shots[0].fail];
+      mgSetBadge(trial, false);
+      mgToast("The machine failed. Read the range warning and re-rig.");
+      mgRefresh();
+      return;
+    }
+
+    if (trial === 0) {
+      var s = shots[0];
+      tel(s, 0);
+      if (s.range > mg.best) mg.best = s.range;
+      var pass = MG_TRIALS[0].judge(s);
+      res.className = "mg-result " + (pass ? "win" : "fail");
+      res.textContent = pass
+        ? mgFmt(s.range, 1) + " m. The far field is yours."
+        : mgFmt(s.range, 1) + " m. Short of the 120 m mark: more preload, a longer arm, or a lighter stone.";
+      mgSetBadge(0, pass);
+      if (pass) mg.wins.push({ t: 0, cfg: mgCfgText(p), range: s.range });
+    } else if (trial === 1) {
+      var s1 = shots[0];
+      tel(s1, winds[0]);
+      if (s1.range > mg.best) mg.best = s1.range;
+      var miss = s1.range - MG_TARGET;
+      var pass1 = MG_TRIALS[1].judge(s1);
+      res.className = "mg-result " + (pass1 ? "win" : "fail");
+      res.textContent = pass1
+        ? mgFmt(s1.range, 1) + " m (" + (miss >= 0 ? "+" : "") + mgFmt(miss, 1) +
+          " m). Gate hit. The flag read " + mgWindText(winds[0]) + " and you read the flag."
+        : mgFmt(s1.range, 1) + " m (" + (miss >= 0 ? "+" : "") + mgFmt(miss, 1) +
+          " m). Outside the 5 m gate. Fresh wind on the flag: " + mgWindText(mg.nextWind) + ". Compensate and loose again.";
+      mgSetBadge(1, pass1);
+      if (pass1) mg.wins.push({ t: 1, cfg: mgCfgText(p), range: s1.range, wind: winds[0] });
+    } else {
+      var worst = 0, detail = [];
+      shots.forEach(function (s, i) {
+        var m = Math.abs(s.range - MG_TARGET);
+        if (m > worst) worst = m;
+        if (s.range > mg.best) mg.best = s.range;
+        detail.push("stone " + (i + 1) + ": " + mgFmt(s.range, 1) + " m (" +
+          (s.range >= MG_TARGET ? "+" : "") + mgFmt(s.range - MG_TARGET, 1) + " m, wind " +
+          mgWindText(winds[i]) + ")");
+      });
+      tel(shots[shots.length - 1], winds[winds.length - 1]);
+      var pass2 = MG_TRIALS[2].judge(shots);
+      res.className = "mg-result " + (pass2 ? "win" : "fail");
+      res.textContent = (pass2
+        ? "Siege train complete. Worst stone " + mgFmt(worst, 1) + " m off the stake. "
+        : "Siege train broken. Worst stone " + mgFmt(worst, 1) + " m off the stake (limit 8 m). ") +
+        detail.join(" ");
+      mgSetBadge(2, pass2);
+      if (pass2) mg.wins.push({ t: 2, cfg: mgCfgText(p), range: worst, wind: winds.join("/") });
+    }
+    mgToast("Shot recorded.");
+    mgRefresh();
+  }
+
+  /* ---------- certificate ---------- */
+  function mgCert() {
+    var lines = mg.wins.map(function (w) {
+      return MG_TRIALS[w.t].name + ": " + w.cfg +
+        (w.wind != null ? ", wind " + w.wind : "") +
+        (w.t === 2 ? ", worst miss " + mgFmt(w.range, 1) + " m" : ", range " + mgFmt(w.range, 1) + " m");
+    });
+    var txt =
+      "RANGE CERTIFICATE\n" +
+      "Garage Inventions Mangonel Range\n" +
+      "================================\n" +
+      "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Machine   : rope-skein mangonel, quadratic-drag flight model\n" +
+      "Result    : ALL THREE RANGE TRIALS PASSED\n" +
+      "Best throw: " + mgFmt(mg.best, 1) + " m\n" +
+      "Winning rigs:\n" + lines.join("\n") + "\n" +
+      "\n120 m in calm air, the 80 m stake inside 5 m against the wind,\n" +
+      "and a three-stone volley inside 8 m with no broken machinery.\n" +
+      "\nSigned by the stake. Gravity did the paperwork.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "range-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    mgToast("Range certificate downloaded");
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mgBuild);
+  } else {
+    mgBuild();
+  }
+
+})();
 
 </script>
 </body>
