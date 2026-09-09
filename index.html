@@ -1,11 +1,72 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <script>
+/* Garage hardening: if native localStorage throws (locked-down WebViews, private mode),
+   swap in a memory-backed replacement so the app keeps working. Runs before all app code. */
+(function () {
+  var ok = false;
+  try {
+    var k = "__garage_probe__";
+    window.localStorage.setItem(k, "1");
+    window.localStorage.removeItem(k);
+    ok = true;
+  } catch (e) { ok = false; }
+  if (ok) return;
+  var mem = {};
+  var shim = {
+    getItem: function (key) { return Object.prototype.hasOwnProperty.call(mem, key) ? mem[key] : null; },
+    setItem: function (key, val) { mem[String(key)] = String(val); },
+    removeItem: function (key) { delete mem[key]; },
+    clear: function () { mem = {}; },
+    key: function (i) { var ks = Object.keys(mem); return (i >= 0 && i < ks.length) ? ks[i] : null; }
+  };
+  Object.defineProperty(shim, "length", { get: function () { return Object.keys(mem).length; } });
+  try {
+    Object.defineProperty(window, "localStorage", { value: shim, configurable: true, writable: true });
+  } catch (e2) {
+    try { window.localStorage = shim; } catch (e3) {}
+  }
+})();
+</script>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
   <link rel="icon" href="data:," />
-  <title>Garage Inventions</title>
+  <title>Garage Inventions: Interactive Engineering Toys & Machine Benches</title>
+  <meta name="description" content="A garage-grade idea collider: real interactive engineering toys in your browser. Tune an engine on the dyno, forge on the Silicon Anvil, lock a signal, mint blueprints. Free, no account, runs entirely on your device." />
+  <link rel="canonical" href="https://dillingerstaffing.github.io/garage-inventions/" />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+  <meta name="theme-color" content="#080c0c" />
+  <meta name="keywords" content="engineering toys, interactive simulation, engine dyno simulator, PID tuning, signal processing, aerodynamics, garage inventions, browser engineering, invention workshop" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Garage Inventions" />
+  <meta property="og:title" content="Garage Inventions: Interactive Engineering Toys & Machine Benches" />
+  <meta property="og:description" content="A garage-grade idea collider: real interactive engineering toys in your browser. Tune an engine on the dyno, forge on the Silicon Anvil, lock a signal, mint blueprints. Free, no account, runs entirely on your device." />
+  <meta property="og:url" content="https://dillingerstaffing.github.io/garage-inventions/" />
+  <meta property="og:image" content="https://dillingerstaffing.github.io/garage-inventions/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Garage Inventions: interactive engineering toys in your browser" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:site" content="@shipthisgroup" />
+  <meta name="twitter:creator" content="@shipthisgroup" />
+  <meta name="twitter:title" content="Garage Inventions: Interactive Engineering Toys & Machine Benches" />
+  <meta name="twitter:description" content="A garage-grade idea collider: real interactive engineering toys in your browser. Tune an engine on the dyno, forge on the Silicon Anvil, lock a signal, mint blueprints. Free, no account, runs entirely on your device." />
+  <meta name="twitter:image" content="https://dillingerstaffing.github.io/garage-inventions/og-image.png" />
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebApplication",
+   "name":"Garage Inventions",
+   "alternateName":"Garage Inventions: Interactive Engineering Toys and Machine Benches",
+   "url":"https://dillingerstaffing.github.io/garage-inventions/",
+   "description":"Interactive engineering toys and machine benches that run entirely in the browser: engine dyno tuning, Silicon Anvil, aerodynamics, PID, suspension, and signal benches. Free, no account.",
+   "applicationCategory":"BrowserApplication",
+   "operatingSystem":"Any modern web browser",
+   "isAccessibleForFree":true,
+   "offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},
+   "author":{"@type":"Person","name":"Chris Dillinger","url":"https://dillingerstaffing.github.io/portfolio/"},
+   "featureList":["Engine dyno tuning bench","Silicon Anvil","Aerodynamics bench","PID tuning bench","Suspension bench","Signal lock bench","RV32I test rig","Shareable invention cards and blueprints"]}
+  </script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -404,6 +465,11 @@
   </style>
 </head>
 <body>
+<noscript><div style="max-width:720px;margin:40px auto;padding:24px;font-family:sans-serif;color:#e9f4e8;background:#101716;border:1px solid #2a3b37;border-radius:12px">
+  <h1>Garage Inventions</h1>
+  <p>A garage-grade idea collider: real interactive engineering toys in your browser. Tune an engine on the dyno, forge on the Silicon Anvil, lock a signal, mint blueprints. Free, no account, runs entirely on your device.</p>
+  <p>This page needs JavaScript to run the benches. Enable it and come back.</p>
+  </div></noscript>
   <main class="page">
     <section class="signal" aria-labelledby="main-title">
       <div>
