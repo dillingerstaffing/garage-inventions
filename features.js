@@ -13083,3 +13083,635 @@ if (typeof module !== "undefined" && module.exports) {
   }
 
 })();
+/* ============================================================
+   THE MEMORY BIN LAB
+   GDDR timing qualification bench for the TAPEOUT GPU refurb
+   line: a real DRAM command-scheduler simulation. Tune tCL,
+   tRCD, tRP, tRAS on three memory modules, watch ACT/RD/WR/PRE
+   commands flow across 8 banks on a live trace, then qualify
+   each module with a 4000-transaction deterministic pass.
+   Pass mark: errors within the ECC budget AND bandwidth at or
+   above the module's grade target. Grade is set by silicon
+   margin (cycles of headroom over each module's hidden floor).
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------------- tiny helpers (module-local) ---------------- */
+  function mb$(id) { return document.getElementById(id); }
+  function mbEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function mbEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function mbHex(n, pad) {
+    var h = (n >>> 0).toString(16).toUpperCase();
+    while (h.length < pad) h = "0" + h;
+    return "0x" + h;
+  }
+  function mbToast(msg) {
+    var t = mb$("mbToastBox");
+    if (!t) {
+      t = mbEl("div", "mb-toast");
+      t.id = "mbToastBox";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 2200);
+  }
+
+  /* ---------------- deterministic RNG ---------------- */
+  function mbRng(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function mbHashTim(tim) {
+    var h = 2166136261;
+    [tim.tCL, tim.tRCD, tim.tRP, tim.tRAS].forEach(function (v) {
+      h ^= v & 0xff; h = Math.imul(h, 16777619);
+    });
+    return h >>> 0;
+  }
+
+  /* ---------------- module definitions ---------------- */
+  var MB_BANKS = 16, MB_ROWS = 4096, MB_BYTES = 128, MB_ECC = 2;
+  var MB_MODULES = [
+    { sku: "M12A-8G", desc: "8Gb entry die, 12Gbps grade", clockMHz: 1500, targetGBs: 47.0,
+      safe: { tCL: 26, tRCD: 26, tRP: 22, tRAS: 48 },
+      floor: { tCL: 24, tRCD: 24, tRP: 20, tRAS: 42 }, local: 0.55, seed: 12001 },
+    { sku: "M14A-16G", desc: "16Gb mid die, 14Gbps grade", clockMHz: 1750, targetGBs: 49.5,
+      safe: { tCL: 26, tRCD: 26, tRP: 22, tRAS: 48 },
+      floor: { tCL: 22, tRCD: 22, tRP: 18, tRAS: 40 }, local: 0.45, seed: 14001 },
+    { sku: "M16X-24G", desc: "24Gb hot die, 16Gbps grade", clockMHz: 2000, targetGBs: 55.5,
+      safe: { tCL: 26, tRCD: 26, tRP: 22, tRAS: 48 },
+      floor: { tCL: 20, tRCD: 20, tRP: 16, tRAS: 36 }, local: 0.35, seed: 16001 }
+  ];
+  var MB_RANGES = {
+    tCL:  { min: 16, max: 30, label: "tCL (CAS latency)" },
+    tRCD: { min: 16, max: 30, label: "tRCD (RAS to CAS)" },
+    tRP:  { min: 12, max: 26, label: "tRP (precharge)" },
+    tRAS: { min: 28, max: 56, label: "tRAS (row active)" }
+  };
+
+  /* ---------------- simulation core (pure, testable) ---------------- */
+  function mbDeficit(floor, tim) {
+    var d = 0;
+    ["tCL", "tRCD", "tRP", "tRAS"].forEach(function (k) {
+      if (tim[k] < floor[k]) d += floor[k] - tim[k];
+    });
+    return d;
+  }
+  function mbMargin(floor, tim) {
+    var m = 1e9;
+    ["tCL", "tRCD", "tRP", "tRAS"].forEach(function (k) {
+      var v = tim[k] - floor[k];
+      if (v < m) m = v;
+    });
+    return m;
+  }
+
+  function mbSim(mod, tim, nTxns, wantTrace) {
+    var rng = mbRng((mod.seed ^ mbHashTim(tim)) >>> 0);
+    /* generate the transaction stream up front */
+    var lastRowG = [];
+    var b;
+    for (b = 0; b < MB_BANKS; b++) lastRowG.push(0);
+    var txns = [];
+    for (var i = 0; i < nTxns; i++) {
+      var bank = (rng() * MB_BANKS) | 0;
+      var row = rng() < mod.local ? lastRowG[bank] : ((rng() * MB_ROWS) | 0);
+      lastRowG[bank] = row;
+      txns.push({ bank: bank, row: row, wr: rng() < 0.3, phase: null, issue: 0 });
+    }
+    /* bank state */
+    var openRow = [], tAct = [], tCol = [], lastAct = [];
+    for (b = 0; b < MB_BANKS; b++) {
+      openRow.push(-1); tAct.push(0); tCol.push(0); lastAct.push(-1e9);
+    }
+    var deficit = mbDeficit(mod.floor, tim);
+    var pErr = deficit > 0 ? 1 - Math.exp(-deficit / 200) : 0;
+    var trace = wantTrace ? [] : null;
+    var WIN = 8, next = 0, cur = 0;
+    var win = [];
+    var errors = 0, latSum = 0, reads = 0, rowHits = 0, cmds = 0, done = 0;
+
+    function enqueuePhase(t) {
+      if (openRow[t.bank] === t.row) { t.phase = "col"; rowHits++; }
+      else if (openRow[t.bank] === -1) t.phase = "act";
+      else t.phase = "pre";
+    }
+    function earliest(t) {
+      var bk = t.bank;
+      if (t.phase === "pre") return Math.max(cur, lastAct[bk] + tim.tRAS);
+      if (t.phase === "act") return Math.max(cur, tAct[bk]);
+      return Math.max(cur, tCol[bk]);
+    }
+    function issueCmd(t, e) {
+      var bk = t.bank;
+      if (t.phase === "pre") {
+        if (trace) trace.push({ c: "P", bank: bk });
+        openRow[bk] = -1;
+        tAct[bk] = e + tim.tRP;
+        t.phase = "act";
+      } else if (t.phase === "act") {
+        if (trace) trace.push({ c: "A", bank: bk });
+        lastAct[bk] = e;
+        tCol[bk] = e + tim.tRCD;
+        openRow[bk] = t.row;
+        t.phase = "col";
+      } else {
+        if (trace) trace.push({ c: t.wr ? "W" : "R", bank: bk });
+        if (!t.wr) { latSum += (e + tim.tCL) - t.issue; reads++; }
+        t.phase = "done";
+      }
+      cmds++;
+      return e + 1;
+    }
+
+    while (done < nTxns) {
+      while (win.length < WIN && next < nTxns) {
+        var t = txns[next++];
+        t.issue = cur;
+        enqueuePhase(t);
+        win.push(t);
+      }
+      /* FR-FCFS: pick the pending txn whose next command can issue earliest */
+      var best = -1, bestE = 1e18;
+      for (var w = 0; w < win.length; w++) {
+        var e = earliest(win[w]);
+        if (e < bestE) { bestE = e; best = w; }
+      }
+      var bt = win[best];
+      cur = issueCmd(bt, Math.max(cur, bestE));
+      if (bt.phase === "done") {
+        if (pErr > 0 && rng() < pErr) errors++;
+        win.splice(best, 1);
+        done++;
+      }
+    }
+    var cycles = cur + (reads ? tim.tCL : 0);
+    var bytes = nTxns * MB_BYTES;
+    return {
+      txns: nTxns, cycles: cycles, cmds: cmds,
+      gbs: bytes / cycles * mod.clockMHz / 1000,
+      avgLat: reads ? latSum / reads : 0,
+      rowHitPct: nTxns ? 100 * rowHits / nTxns : 0,
+      errors: errors, margin: mbMargin(mod.floor, tim),
+      deficit: deficit, trace: trace
+    };
+  }
+
+  function mbGrade(res) {
+    if (res.margin >= 3) return "A";
+    if (res.margin >= 0) return "B";
+    return "C";
+  }
+  function mbVerdict(mod, res) {
+    if (res.errors > MB_ECC)
+      return { pass: false, why: res.errors + " bit errors (ECC budget " + MB_ECC + ")" };
+    if (res.gbs < mod.targetGBs)
+      return { pass: false, why: res.gbs.toFixed(1) + " GB/s under the " + mod.targetGBs.toFixed(1) + " GB/s target" };
+    return { pass: true, why: "qualified" };
+  }
+
+  /* ---------------- styles ---------------- */
+  var MB_CSS = [
+    ".mb-overlay{position:fixed;inset:0;background:rgba(4,7,7,.93);z-index:95;display:none;overflow-y:auto;padding:18px 12px;}",
+    ".mb-overlay.open{display:block;}",
+    ".mb-panel{max-width:1140px;margin:0 auto;background:var(--panel);border:1px solid var(--line);padding:22px;}",
+    ".mb-panel h3{font-family:'Chakra Petch',sans-serif;font-size:26px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.02em;color:var(--acid);}",
+    ".mb-sub{font-size:12px;line-height:1.65;color:#9fb3ae;margin:0 0 14px;max-width:82ch;}",
+    ".mb-sub a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan);}",
+    ".mb-close{float:right;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:12px;padding:10px 16px;cursor:pointer;min-height:44px;}",
+    ".mb-deck{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:12px;}",
+    ".mb-mod{border:1px solid var(--line);background:var(--panel-2);padding:12px 14px;cursor:pointer;min-height:44px;}",
+    ".mb-mod h4{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-size:16px;color:var(--ink);}",
+    ".mb-mod p{margin:0 0 6px;font-size:11px;color:#7c8d89;line-height:1.5;}",
+    ".mb-mod.sel{border-color:var(--acid);}",
+    ".mb-mod .stamp{font-size:10px;letter-spacing:.12em;font-weight:700;}",
+    ".mb-mod .stamp.pass{color:var(--acid);}",
+    ".mb-mod .stamp.fail{color:var(--orange);}",
+    ".mb-ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;}",
+    ".mb-field{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".mb-field h4{margin:0 0 6px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".mb-field input[type=range]{width:100%;accent-color:var(--acid);min-height:44px;}",
+    ".mb-field .val{font-family:monospace;font-size:13px;color:var(--acid);}",
+    ".mb-field .val.neg{color:var(--orange);}",
+    ".mb-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;}",
+    ".mb-toolbar .secondary{min-height:48px;font-size:12px;padding:10px 18px;}",
+    ".mb-run{border-color:var(--acid) !important;color:var(--acid) !important;font-weight:700;}",
+    ".mb-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px;}",
+    ".mb-tile{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".mb-tile h4{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".mb-tile p{margin:0;font-family:monospace;font-size:18px;color:var(--ink);}",
+    ".mb-tile p.good{color:var(--acid);}.mb-tile p.bad{color:var(--orange);}",
+    ".mb-banks{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-bottom:12px;}",
+    ".mb-bank{border:1px solid var(--line);background:#0a0f0e;padding:8px 10px;font-family:monospace;font-size:11px;color:#7c8d89;}",
+    ".mb-bank b{display:block;font-size:10px;letter-spacing:.1em;color:var(--cyan);margin-bottom:4px;}",
+    ".mb-bank.open{border-color:var(--cyan);color:var(--ink);}",
+    ".mb-tracebox{border:1px solid var(--line);background:#0a0f0e;padding:12px;margin-bottom:12px;}",
+    ".mb-tracebox h4{margin:0 0 8px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".mb-trace{display:flex;flex-wrap:wrap;gap:2px;min-height:26px;}",
+    ".mb-c{width:14px;height:22px;display:inline-block;border:1px solid #0a0f0e;font-family:monospace;font-size:9px;line-height:22px;text-align:center;color:#04110f;}",
+    ".mb-c.A{background:var(--acid);}.mb-c.R{background:var(--cyan);}.mb-c.W{background:var(--orange);}.mb-c.P{background:#3a4a47;color:#0a0f0e;}",
+    ".mb-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:10px;color:#7c8d89;letter-spacing:.06em;}",
+    ".mb-legend i{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;}",
+    ".mb-verdict{border:1px solid var(--line);padding:14px 16px;margin-bottom:12px;font-family:monospace;font-size:13px;line-height:1.7;display:none;}",
+    ".mb-verdict.show{display:block;}",
+    ".mb-verdict.pass{border-color:var(--acid);background:rgba(199,255,56,.05);}",
+    ".mb-verdict.fail{border-color:var(--orange);background:rgba(255,107,44,.06);}",
+    ".mb-verdict .big{font-family:'Chakra Petch',sans-serif;font-size:20px;letter-spacing:.06em;}",
+    ".mb-verdict.pass .big{color:var(--acid);}.mb-verdict.fail .big{color:var(--orange);}",
+    ".mb-log{border:1px solid var(--line);background:#0a0f0e;padding:12px 14px;margin-bottom:12px;font-family:monospace;font-size:12px;line-height:1.8;color:#9fb3ae;max-height:150px;overflow-y:auto;}",
+    ".mb-log .p{color:var(--acid);}.mb-log .f{color:var(--orange);}",
+    ".mb-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--panel);border:1px solid var(--acid);color:var(--ink);padding:12px 20px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:200;max-width:90vw;}",
+    ".mb-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}",
+    "@media (max-width:640px){.mb-panel{padding:14px;}.mb-panel h3{font-size:20px;}}"
+  ].join("\n");
+
+  /* ---------------- UI ---------------- */
+  var ui = null, probeTimer = null;
+
+  function mbBuild() {
+    if (ui) return ui;
+    var st = document.createElement("style");
+    st.textContent = MB_CSS;
+    document.head.appendChild(st);
+
+    var box = document.querySelector(".dossier .actions");
+    if (box && !mb$("mbBtn")) {
+      var b = mbEl("button", "secondary", "Run the Memory Bin Lab");
+      b.id = "mbBtn";
+      b.addEventListener("click", function () { mb$("mbOverlay").classList.add("open"); });
+      box.appendChild(b);
+    }
+
+    var ov = mbEl("div", "mb-overlay");
+    ov.id = "mbOverlay";
+    var panel = mbEl("div", "mb-panel");
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    panel.innerHTML =
+      '<button class="mb-close" id="mbClose">CLOSE [x]</button>' +
+      "<h3>The Memory Bin Lab</h3>" +
+      '<p class="mb-sub">A GDDR timing qualification bench for the GPU refurb line at ' +
+      '<a href="https://dillingerstaffing.github.io/tapeout/" target="_blank" rel="noopener">TAPEOUT</a>: ' +
+      "every pulled card gets its memory re-binned before it ships. This is the bench that does it. " +
+      "Pick a module, tune the four timings, probe the command bus live " +
+      "(<b style='color:var(--acid)'>A</b>=activate, <b style='color:var(--cyan)'>R</b>=read, " +
+      "<b style='color:var(--orange)'>W</b>=write, <b style='color:#9fb3ae'>P</b>=precharge), " +
+      "then qualify: 4000 deterministic transactions, zero luck. Pass mark is errors inside the ECC budget " +
+      "and bandwidth on target. Your grade is pure silicon margin: cycles of headroom over the die's hidden floor. " +
+      "Qualify all three modules for the Memory Bin Master certificate.</p>";
+
+    /* module deck */
+    var deck = mbEl("div", "mb-deck");
+    panel.appendChild(deck);
+
+    /* timing controls */
+    var ctl = mbEl("div", "mb-ctl");
+    panel.appendChild(ctl);
+
+    ui = { ov: ov, deck: deck, ctl: ctl, modIdx: 0, sliders: {}, vals: {}, tiles: {}, banks: [], trace: null, verdict: null, log: null, results: [{}, {}, {}], masterBtn: null };
+
+    MB_MODULES.forEach(function (m, i) {
+      var card = mbEl("div", "mb-mod", "<h4>" + mbEsc(m.sku) + '</h4><p>' + mbEsc(m.desc) +
+        "<br>Target: " + m.targetGBs.toFixed(1) + " GB/s at " + m.clockMHz + " MHz</p>" +
+        '<span class="stamp" id="mbStamp' + i + '">UNTESTED</span>');
+      if (i === 0) card.classList.add("sel");
+      card.addEventListener("click", function () { mbSelectMod(i); });
+      deck.appendChild(card);
+      ui["card" + i] = card;
+    });
+
+    Object.keys(MB_RANGES).forEach(function (k) {
+      var r = MB_RANGES[k];
+      var f = mbEl("div", "mb-field", "<h4>" + mbEsc(r.label) + "</h4>");
+      var inp = document.createElement("input");
+      inp.type = "range"; inp.min = r.min; inp.max = r.max; inp.value = 26;
+      if (k === "tRP") inp.value = 22;
+      if (k === "tRAS") inp.value = 48;
+      var v = mbEl("div", "val", inp.value + " cyc");
+      inp.addEventListener("input", function () {
+        v.textContent = inp.value + " cyc";
+        mbUpdateMargin();
+      });
+      f.appendChild(inp); f.appendChild(v);
+      ctl.appendChild(f);
+      ui.sliders[k] = inp; ui.vals[k] = v;
+    });
+
+    /* toolbar */
+    var tb = mbEl("div", "mb-toolbar");
+    var btnProbe = mbEl("button", "secondary", "PROBE LIVE (240)");
+    var btnQual = mbEl("button", "secondary mb-run", "QUALIFY MODULE (4000)");
+    var btnSafe = mbEl("button", "secondary", "RESET TO SAFE");
+    var btnCard = mbEl("button", "secondary", "DOWNLOAD BIN CARD");
+    btnCard.style.display = "none";
+    tb.appendChild(btnProbe); tb.appendChild(btnQual); tb.appendChild(btnSafe); tb.appendChild(btnCard);
+    panel.appendChild(tb);
+    ui.btnCard = btnCard;
+
+    btnProbe.addEventListener("click", mbProbe);
+    btnQual.addEventListener("click", mbQualify);
+    btnSafe.addEventListener("click", function () {
+      var s = MB_MODULES[ui.modIdx].safe;
+      Object.keys(s).forEach(function (k) {
+        ui.sliders[k].value = s[k];
+        ui.vals[k].textContent = s[k] + " cyc";
+      });
+      mbUpdateMargin();
+      mbToast("Timings reset to safe JEDEC values");
+    });
+    btnCard.addEventListener("click", mbDownloadCard);
+
+    /* meters */
+    var tiles = mbEl("div", "mb-tiles");
+    panel.appendChild(tiles);
+    [["BANDWIDTH", "gbs", "GB/s"], ["AVG READ LAT", "lat", "cyc"], ["ROW HIT", "hit", "%"],
+     ["ERRORS", "err", ""], ["MARGIN", "mgn", "cyc"], ["COMMANDS", "cmd", ""]].forEach(function (t) {
+      var d = mbEl("div", "mb-tile", "<h4>" + t[0] + "</h4><p>-</p>");
+      tiles.appendChild(d);
+      ui.tiles[t[1]] = d.querySelector("p");
+    });
+
+    /* bank grid */
+    var bg = mbEl("div", "mb-banks");
+    panel.appendChild(bg);
+    for (var bi = 0; bi < MB_BANKS; bi++) {
+      var bk = mbEl("div", "mb-bank", "<b>BANK " + bi + "</b><span>IDLE</span>");
+      bg.appendChild(bk);
+      ui.banks.push(bk);
+    }
+
+    /* trace */
+    var tbox = mbEl("div", "mb-tracebox", "<h4>COMMAND BUS TRACE</h4>");
+    var tr = mbEl("div", "mb-trace");
+    tbox.appendChild(tr);
+    var leg = mbEl("div", "mb-legend",
+      '<span><i style="background:var(--acid)"></i>A activate</span>' +
+      '<span><i style="background:var(--cyan)"></i>R read</span>' +
+      '<span><i style="background:var(--orange)"></i>W write</span>' +
+      '<span><i style="background:#3a4a47"></i>P precharge</span>');
+    tbox.appendChild(leg);
+    panel.appendChild(tbox);
+    ui.trace = tr;
+
+    /* verdict */
+    var vd = mbEl("div", "mb-verdict");
+    panel.appendChild(vd);
+    ui.verdict = vd;
+
+    /* attempt log */
+    var lg = mbEl("div", "mb-log", "attempt log: quiet so far. probe or qualify to make some noise.");
+    lg.dataset.empty = "1";
+    panel.appendChild(lg);
+    ui.log = lg;
+
+    /* master certificate */
+    var mb2 = mbEl("div", "mb-toolbar");
+    var master = mbEl("button", "secondary mb-run", "DOWNLOAD MEMORY BIN MASTER CERTIFICATE");
+    master.style.display = "none";
+    master.addEventListener("click", mbDownloadMaster);
+    mb2.appendChild(master);
+    panel.appendChild(mb2);
+    ui.masterBtn = master;
+
+    mb$("mbClose").addEventListener("click", function () {
+      mbStopProbe();
+      ov.classList.remove("open");
+    });
+
+    mbUpdateMargin();
+    return ui;
+  }
+
+  function mbSelectMod(i) {
+    ui.modIdx = i;
+    for (var j = 0; j < MB_MODULES.length; j++) {
+      ui["card" + j].classList.toggle("sel", j === i);
+    }
+    mbUpdateMargin();
+    mbToast("Module " + MB_MODULES[i].sku + " on the bench");
+  }
+
+  function mbTimings() {
+    var t = {};
+    Object.keys(ui.sliders).forEach(function (k) { t[k] = parseInt(ui.sliders[k].value, 10); });
+    return t;
+  }
+
+  function mbUpdateMargin() {
+    var m = MB_MODULES[ui.modIdx];
+    var mg = mbMargin(m.floor, mbTimings());
+    var p = ui.tiles.mgn;
+    p.textContent = (mg >= 0 ? "+" : "") + mg;
+    p.className = mg >= 0 ? "good" : "bad";
+  }
+
+  function mbLog(html, cls) {
+    if (ui.log.dataset.empty) { ui.log.innerHTML = ""; delete ui.log.dataset.empty; }
+    var d = mbEl("div", cls || null, html);
+    ui.log.appendChild(d);
+    ui.log.scrollTop = ui.log.scrollHeight;
+  }
+  function mbSetTiles(res) {
+    ui.tiles.gbs.textContent = res.gbs.toFixed(1);
+    ui.tiles.gbs.className = res.gbs >= MB_MODULES[ui.modIdx].targetGBs ? "good" : "";
+    ui.tiles.lat.textContent = res.avgLat.toFixed(1);
+    ui.tiles.lat.className = "";
+    ui.tiles.hit.textContent = res.rowHitPct.toFixed(1);
+    ui.tiles.hit.className = "";
+    ui.tiles.err.textContent = String(res.errors);
+    ui.tiles.err.className = res.errors > MB_ECC ? "bad" : (res.errors > 0 ? "" : "good");
+    ui.tiles.mgn.textContent = (res.margin >= 0 ? "+" : "") + res.margin;
+    ui.tiles.mgn.className = res.margin >= 0 ? "good" : "bad";
+    ui.tiles.cmd.textContent = String(res.cmds);
+    ui.tiles.cmd.className = "";
+  }
+
+  function mbStopProbe() {
+    if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+  }
+
+  function mbProbe() {
+    mbBuild();
+    mbStopProbe();
+    var m = MB_MODULES[ui.modIdx];
+    var res = mbSim(m, mbTimings(), 240, true);
+    var trace = res.trace;
+    ui.trace.innerHTML = "";
+    ui.banks.forEach(function (bk) {
+      bk.classList.remove("open");
+      bk.querySelector("span").textContent = "IDLE";
+    });
+    ui.verdict.classList.remove("show");
+    var openRows = {};
+    var idx = 0;
+    probeTimer = setInterval(function () {
+      var n = Math.min(idx + 24, trace.length);
+      for (; idx < n; idx++) {
+        var t = trace[idx];
+        var c = mbEl("span", "mb-c " + t.c, t.c);
+        ui.trace.appendChild(c);
+        while (ui.trace.children.length > 160) ui.trace.removeChild(ui.trace.firstChild);
+        var bk = ui.banks[t.bank];
+        if (t.c === "A") { bk.classList.add("open"); openRows[t.bank] = true; bk.querySelector("span").textContent = "ROW OPEN"; }
+        if (t.c === "P") { bk.classList.remove("open"); delete openRows[t.bank]; bk.querySelector("span").textContent = "IDLE"; }
+      }
+      if (idx >= trace.length) {
+        mbStopProbe();
+        mbSetTiles(res);
+        mbLog("probe " + mbEsc(m.sku) + ": " + res.gbs.toFixed(1) + " GB/s, " +
+          res.errors + " errors, margin " + (res.margin >= 0 ? "+" : "") + res.margin);
+      }
+    }, 60);
+    mbToast("Probing " + m.sku + ": 240 transactions on the bus");
+  }
+
+  function mbQualify() {
+    mbBuild();
+    mbStopProbe();
+    var m = MB_MODULES[ui.modIdx];
+    var tim = mbTimings();
+    var res = mbSim(m, tim, 4000, false);
+    mbSetTiles(res);
+    var v = mbVerdict(m, res);
+    var vd = ui.verdict;
+    vd.className = "mb-verdict show " + (v.pass ? "pass" : "fail");
+    var grade = v.pass ? mbGrade(res) : "-";
+    vd.innerHTML = '<div class="big">' + (v.pass ? "PASS" : "FAIL") + " : " + mbEsc(m.sku) + "</div>" +
+      mbEsc(v.why) + "<br>" +
+      "bandwidth " + res.gbs.toFixed(1) + " GB/s (target " + m.targetGBs.toFixed(1) + "), " +
+      "errors " + res.errors + " (budget " + MB_ECC + "), " +
+      "margin " + (res.margin >= 0 ? "+" : "") + res.margin + " cyc" +
+      (v.pass ? ", bin grade <b>" + grade + "</b>" : "") + "<br>" +
+      "timings tCL/tRCD/tRP/tRAS = " + tim.tCL + "/" + tim.tRCD + "/" + tim.tRP + "/" + tim.tRAS;
+    var stamp = mb$("mbStamp" + ui.modIdx);
+    var prev = ui.results[ui.modIdx];
+    if (v.pass && (!prev.pass || mbGradeRank(grade) < mbGradeRank(prev.grade))) {
+      ui.results[ui.modIdx] = { pass: true, grade: grade, res: res, tim: tim };
+    } else if (!v.pass && !prev.pass) {
+      ui.results[ui.modIdx] = { pass: false };
+    }
+    var cur = ui.results[ui.modIdx];
+    stamp.textContent = cur.pass ? ("PASS : GRADE " + cur.grade) : "FAIL";
+    stamp.className = "stamp " + (cur.pass ? "pass" : "fail");
+    ui.btnCard.style.display = cur.pass ? "" : "none";
+    mbLog((v.pass ? '<span class="p">PASS</span>' : '<span class="f">FAIL</span>') + " " +
+      mbEsc(m.sku) + " @ " + tim.tCL + "/" + tim.tRCD + "/" + tim.tRP + "/" + tim.tRAS +
+      ": " + res.gbs.toFixed(1) + " GB/s, " + res.errors + " err" + (v.pass ? ", grade " + grade : ""),
+      v.pass ? "p" : "f");
+    var done = ui.results.filter(function (r) { return r.pass; }).length;
+    if (done === MB_MODULES.length) {
+      ui.masterBtn.style.display = "";
+      mbToast("All three modules qualified. Memory Bin Master earned.");
+    } else {
+      mbToast(v.pass ? (m.sku + " qualified, grade " + grade + " (" + done + "/3)") : (m.sku + " failed: " + v.why));
+    }
+  }
+
+  function mbGradeRank(g) { return g === "A" ? 0 : (g === "B" ? 1 : 2); }
+
+  function mbDownloadCard() {
+    var m = MB_MODULES[ui.modIdx];
+    var r = ui.results[ui.modIdx];
+    if (!r.pass) return;
+    var lines = [
+      "===============================================",
+      "  THE MEMORY BIN LAB - GARAGE INVENTIONS",
+      "  MEMORY BIN CARD",
+      "===============================================",
+      "",
+      "Module: " + m.sku + " (" + m.desc + ")",
+      "Qualified timings (tCL/tRCD/tRP/tRAS): " +
+        r.tim.tCL + "/" + r.tim.tRCD + "/" + r.tim.tRP + "/" + r.tim.tRAS + " cycles",
+      "Measured bandwidth: " + r.res.gbs.toFixed(1) + " GB/s (target " + m.targetGBs.toFixed(1) + ")",
+      "Avg read latency: " + r.res.avgLat.toFixed(1) + " cycles",
+      "Row hit rate: " + r.res.rowHitPct.toFixed(1) + "%",
+      "Bit errors: " + r.res.errors + " (ECC budget " + MB_ECC + ")",
+      "Silicon margin: " + (r.res.margin >= 0 ? "+" : "") + r.res.margin + " cycles",
+      "BIN GRADE: " + r.grade,
+      "",
+      "4000-transaction deterministic qualification, 8 banks,",
+      "128-byte accesses, real command scheduling.",
+      "",
+      "Issued " + new Date().toISOString().slice(0, 10) + " by Emi's Garage"
+    ];
+    mbDownload(lines.join("\n"), "memory-bin-card-" + m.sku + ".txt");
+    mbToast("Bin card downloaded");
+  }
+
+  function mbDownloadMaster() {
+    var lines = [
+      "===============================================",
+      "  THE MEMORY BIN LAB - GARAGE INVENTIONS",
+      "  MEMORY BIN MASTER CERTIFICATE",
+      "===============================================",
+      "",
+      "Awarded to the tuner who qualified all three",
+      "memory modules on the bin bench:",
+      ""
+    ];
+    MB_MODULES.forEach(function (m, i) {
+      var r = ui.results[i];
+      lines.push(m.sku + ": PASS, grade " + r.grade + ", " + r.res.gbs.toFixed(1) +
+        " GB/s @ " + r.tim.tCL + "/" + r.tim.tRCD + "/" + r.tim.tRP + "/" + r.tim.tRAS);
+    });
+    lines.push("");
+    lines.push("Three for three. The refurb line trusts your hands.");
+    lines.push("");
+    lines.push("Issued " + new Date().toISOString().slice(0, 10) + " by Emi's Garage");
+    mbDownload(lines.join("\n"), "memory-bin-master-certificate.txt");
+    mbToast("Certificate downloaded");
+  }
+
+  function mbDownload(text, name) {
+    var blob = new Blob([text], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      (window.URL || window.webkitURL).revokeObjectURL(a.href);
+      a.remove();
+    }, 500);
+  }
+
+  /* ---------------- init ---------------- */
+  function mbInit() {
+    if (typeof document === "undefined") return;
+    if (!document.querySelector(".dossier .actions")) return;
+    mbBuild();
+  }
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", mbInit);
+    } else {
+      mbInit();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      MB: {
+        sim: mbSim, modules: MB_MODULES, deficit: mbDeficit,
+        margin: mbMargin, verdict: mbVerdict, grade: mbGrade
+      }
+    };
+  }
+
+})();
