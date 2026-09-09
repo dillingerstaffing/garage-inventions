@@ -11134,6 +11134,458 @@ function gyScoreLift(st) {
   }
 
 })();
+/* ============================================================
+   THE WIPE STATION
+   NIST 800-88 drive sanitization bench for the OLD IRON intake
+   rack. Pick a method per drive (Clear / Purge / Destroy), run
+   the passes, watch verification sample every block, and issue
+   per-serial certificates. Fail states are real: bad-sector
+   spinners and lying firmware cannot be purged, they must be
+   destroyed. Self-contained, appended at the end of features.js.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  function ws$(id) { return document.getElementById(id); }
+  function wsEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function wsEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function wsToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = ws$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+
+  var WS_CSS = [
+    ".ws-overlay{position:fixed;inset:0;background:rgba(4,7,7,.92);z-index:90;display:none;overflow-y:auto;padding:18px 12px;}",
+    ".ws-overlay.open{display:block;}",
+    ".ws-panel{max-width:1060px;margin:0 auto;background:var(--panel);border:1px solid var(--line);padding:22px;}",
+    ".ws-panel h3{font-family:'Chakra Petch',sans-serif;font-size:26px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.02em;color:var(--acid);}",
+    ".ws-sub{color:#8a9a96;font-size:12px;line-height:1.7;margin:0 0 16px;max-width:70ch;}",
+    ".ws-sub b{color:var(--cyan);font-weight:600;}",
+    ".ws-methods{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 16px;}",
+    ".ws-method{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;font-size:11px;line-height:1.6;color:#9aa9a5;}",
+    ".ws-method h6{margin:0 0 4px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--orange);}",
+    ".ws-method p{margin:0;}",
+    ".ws-bays{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}",
+    "@media(max-width:760px){.ws-bays{grid-template-columns:1fr;}.ws-methods{grid-template-columns:1fr;}}",
+    ".ws-bay{border:1px solid var(--line);background:var(--panel-2);padding:14px;position:relative;}",
+    ".ws-bay .ws-bayhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;}",
+    ".ws-bay h5{margin:0;font-family:'Chakra Petch',sans-serif;font-size:16px;text-transform:uppercase;}",
+    ".ws-bay .ws-sn{font-size:10px;color:#72827f;letter-spacing:.08em;}",
+    ".ws-bay .ws-meta{font-size:11px;color:#9aa9a5;margin:6px 0 10px;line-height:1.6;}",
+    ".ws-bay .ws-note{font-size:11px;color:var(--cyan);margin:0 0 10px;line-height:1.6;min-height:34px;}",
+    ".ws-status{font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:3px 8px;border:1px solid var(--line);}",
+    ".ws-status.pending{color:#8a9a96;}",
+    ".ws-status.running{color:var(--cyan);border-color:var(--cyan);}",
+    ".ws-status.clean{color:var(--acid);border-color:var(--acid);}",
+    ".ws-status.destroyed{color:var(--orange);border-color:var(--orange);}",
+    ".ws-status.failed{color:#ff5d5d;border-color:#ff5d5d;}",
+    ".ws-mrow{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}",
+    ".ws-mrow button{flex:1 1 30%;min-height:44px;background:var(--black);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;padding:8px 4px;}",
+    ".ws-mrow button.on{border-color:var(--acid);color:var(--acid);}",
+    ".ws-mrow button:disabled{opacity:.45;cursor:default;}",
+    ".ws-bar{height:10px;background:var(--black);border:1px solid var(--line);margin:8px 0;position:relative;overflow:hidden;}",
+    ".ws-bar i{position:absolute;inset:0;width:0%;background:var(--cyan);}",
+    ".ws-phase{font-size:11px;color:#8a9a96;min-height:18px;margin:0 0 6px;}",
+    ".ws-grid{display:grid;grid-template-columns:repeat(16,minmax(0,1fr));gap:2px;margin:8px 0;}",
+    ".ws-cell{aspect-ratio:1;background:#101515;border:1px solid #1c2423;}",
+    ".ws-cell.ok{background:var(--acid);}",
+    ".ws-cell.bad{background:#ff5d5d;}",
+    ".ws-cell.check{background:var(--cyan);}",
+    ".ws-result{font-size:12px;line-height:1.6;margin:8px 0 0;min-height:38px;}",
+    ".ws-result.good{color:var(--acid);}",
+    ".ws-result.bad{color:#ff5d5d;}",
+    ".ws-result.warn{color:var(--orange);}",
+    ".ws-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;align-items:center;}",
+    ".ws-foot button{min-height:48px;padding:12px 18px;background:var(--black);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:12px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;}",
+    ".ws-foot button.primary{border-color:var(--acid);color:var(--acid);}",
+    ".ws-foot button:disabled{opacity:.45;cursor:default;}",
+    ".ws-banner{border:1px solid var(--acid);background:rgba(170,255,0,.06);padding:14px 16px;margin-top:16px;display:none;}",
+    ".ws-banner h4{margin:0 0 6px;font-family:'Chakra Petch',sans-serif;font-size:18px;color:var(--acid);text-transform:uppercase;}",
+    ".ws-banner p{margin:0;font-size:12px;line-height:1.7;color:var(--ink);}",
+    ".ws-summary{font-size:12px;line-height:1.8;color:#9aa9a5;margin-top:16px;display:none;}",
+    ".ws-summary table{width:100%;border-collapse:collapse;font-size:11px;}",
+    ".ws-summary td,.ws-summary th{border:1px solid var(--line);padding:6px 8px;text-align:left;}",
+    ".ws-summary th{color:var(--cyan);text-transform:uppercase;letter-spacing:.1em;font-size:10px;}"
+  ].join("\n");
+
+  var WS_METHODS = {
+    CLEAR:   { label: "Clear",   cost: 8,  blurb: "Single overwrite pass over every addressable block, then sampled read-back. Cheap and slow. On flash media the over-provisioned cells are never touched." },
+    PURGE:   { label: "Purge",   cost: 4,  blurb: "Firmware-level command (ATA Secure Erase, NVMe Format). Fast and thorough, but the drive has to tell the truth, and verification has to reach every sector." },
+    DESTROY: { label: "Destroy", cost: 12, blurb: "Physical shred to 6mm particles. No data survives, no certificate needed, no drive either. The honest answer for dying media." }
+  };
+
+  var WS_DRIVES = [
+    { id: 0, name: "WD Blue 2TB", sn: "WX81A49N2K77", cap: "2 TB", iface: "SATA 6Gb/s", media: "HDD", blurb: "Retired office spinner. SMART is clean, no grown defects. A textbook candidate." },
+    { id: 1, name: "Samsung 970 EVO 1TB", sn: "S5XANX0T991822B", cap: "1 TB", iface: "NVMe Gen3", media: "SSD", blurb: "NVMe stick from a decommissioned workstation. Firmware is current and behaves." },
+    { id: 2, name: "Seagate Barracuda 4TB", sn: "Z1D0Q2PW44H9", cap: "4 TB", iface: "SATA 6Gb/s", media: "HDD", blurb: "Click of death adjacent. Grown defect list is long, some sectors will never read again." },
+    { id: 3, name: "SanDisk Ultra 512GB", sn: "203917QABX44", cap: "512 GB", iface: "SATA 6Gb/s", media: "SSD", blurb: "Budget SSD with a known firmware quirk: Secure Erase reports success while stale blocks linger in spare cells." }
+  ];
+
+  var wsState = WS_DRIVES.map(function () {
+    return { method: "CLEAR", status: "pending", running: false, failNote: "", done: false, cert: null };
+  });
+  var wsEls = {};
+  var wsTotalCost = 0;
+  function wsOutcome(drive, method) {
+    if (method === "DESTROY") {
+      return { pass: true, destroy: true, cells: [], note: "Shredded to 6mm particles. Verification not applicable: the media no longer exists." };
+    }
+    if (method === "PURGE" && drive.id === 2) {
+      return { pass: false, cells: [7, 23, 58, 91, 120, 141], note: "FAIL: grown-defect sectors are unreadable, so verification cannot confirm them. Purge cannot sanitize what it cannot reach. Per NIST 800-88, this media must be destroyed." };
+    }
+    if (method === "PURGE" && drive.id === 3) {
+      return { pass: false, cells: [44, 45, 100, 101], note: "FAIL: verification found stale data in over-provisioned cells after a successful-looking Secure Erase. The firmware lied. Per NIST 800-88, this media must be destroyed." };
+    }
+    if (method === "CLEAR" && (drive.media === "SSD")) {
+      return { pass: true, caveat: true, cells: [], note: "PASS with caveat: one overwrite pass completed and sampled blocks read back clean. Warning: clear does not sanitize over-provisioned flash cells (NIST 800-88). Certificate carries the caveat." };
+    }
+    return { pass: true, cells: [], note: "PASS: overwrite pass completed, sampled blocks read back clean. Media is sanitized." };
+  }
+
+  function wsStopTimer(s) {
+    if (s && s.timer) { clearInterval(s.timer); s.timer = null; }
+  }
+  function wsStopAll() {
+    wsState.forEach(wsStopTimer);
+  }
+
+  function wsRefreshBay(i) {
+    var s = wsState[i], els = wsEls.bays[i];
+    var st = els.status;
+    st.textContent = s.status.toUpperCase().replace("CLEAN", "SANITIZED");
+    st.className = "ws-status " + s.status;
+    els.methodBtns.forEach(function (b, bi) {
+      var m = ["CLEAR", "PURGE", "DESTROY"][bi];
+      b.className = (s.method === m && !s.done) ? "on" : "";
+      b.disabled = s.running || s.done;
+    });
+    els.run.disabled = s.running || s.done;
+    els.rerun.style.display = (s.done && s.status === "failed") ? "" : "none";
+  }
+
+  function wsRefreshAll() {
+    for (var i = 0; i < WS_DRIVES.length; i++) wsRefreshBay(i);
+    var done = wsState.filter(function (s) { return s.cert; }).length;
+    wsEls.dl.disabled = done === 0;
+    var allResolved = wsState.every(function (s) { return s.status === "clean" || s.status === "destroyed"; });
+    if (allResolved && !wsEls.bannerDone) {
+      wsEls.bannerDone = true;
+      var clean = wsState.filter(function (s) { return s.status === "clean"; }).length;
+      var dest = wsState.filter(function (s) { return s.status === "destroyed"; }).length;
+      var cav = wsState.filter(function (s) { return s.cert && s.cert.caveat; }).length;
+      wsEls.banner.style.display = "block";
+      wsEls.banner.querySelector("p").innerHTML =
+        "All four drives are resolved: <b>" + clean + " sanitized</b>, <b>" + dest + " destroyed</b>. " +
+        "Total shop cost <b>$" + wsTotalCost + "</b>" +
+        (cav ? " (" + cav + " certificate" + (cav > 1 ? "s carry" : " carries") + " a flash caveat)" : "") +
+        ". Every serial below has its paperwork. That is the whole job.";
+      wsEls.summary.style.display = "block";
+      wsBuildSummary();
+      wsToast("Shift complete: all drives resolved");
+    }
+  }
+
+  function wsBuildSummary() {
+    var html = "<table><tr><th>Drive</th><th>Serial</th><th>Method</th><th>Result</th><th>Cost</th></tr>";
+    WS_DRIVES.forEach(function (d, i) {
+      var s = wsState[i];
+      var res = s.status === "clean" ? (s.cert && s.cert.caveat ? "Sanitized (flash caveat)" : "Sanitized") :
+                s.status === "destroyed" ? "Destroyed" : "Failed";
+      html += "<tr><td>" + wsEsc(d.name) + "</td><td>" + wsEsc(d.sn) + "</td><td>" +
+        wsEsc(WS_METHODS[s.cert ? s.cert.method : "CLEAR"].label) + "</td><td>" + wsEsc(res) +
+        "</td><td>$" + (s.cert ? s.cert.cost : 0) + "</td></tr>";
+    });
+    html += "</table>";
+    wsEls.summary.innerHTML = "<h4>Shift summary</h4>" + html;
+  }
+
+  function wsRun(i) {
+    var d = WS_DRIVES[i], s = wsState[i], els = wsEls.bays[i];
+    if (s.running || s.done) return;
+    s.running = true;
+    s.status = "running";
+    s.failNote = "";
+    var m = WS_METHODS[s.method];
+    wsRefreshBay(i);
+    els.result.className = "ws-result";
+    els.result.textContent = "";
+
+    var outcome = wsOutcome(d, s.method);
+    var totalTicks = s.method === "PURGE" ? 26 : s.method === "DESTROY" ? 34 : 60;
+    var tick = 0;
+    var cells = els.cells;
+    for (var ci = 0; ci < cells.length; ci++) {
+      cells[ci].className = "ws-cell";
+    }
+
+    var phases = s.method === "CLEAR"
+      ? ["Seating drive in the write blocker...", "Overwrite pass 1 of 1: writing zeros to every addressable block...", "Read-back verification: sampling 160 blocks..."]
+      : s.method === "PURGE"
+      ? ["Issuing firmware sanitize command...", "Waiting on the controller (do not power-cycle)...", "Full verification: reading every block..."]
+      : ["Feeding drive to the shredder...", "Grinding to 6mm particles...", "Sweeping up the confetti..."];
+
+    wsStopTimer(s);
+    s.timer = setInterval(function () {
+      tick++;
+      var pct = Math.min(100, Math.round((tick / totalTicks) * 100));
+      els.barFill.style.width = pct + "%";
+      var ph = tick < totalTicks * 0.35 ? 0 : tick < totalTicks * 0.8 ? 1 : 2;
+      els.phase.textContent = phases[ph] + " " + pct + "%";
+
+      if (tick >= totalTicks * 0.55 && tick < totalTicks) {
+        var lit = Math.floor(((tick - totalTicks * 0.55) / (totalTicks * 0.45)) * cells.length);
+        for (var k = 0; k < cells.length; k++) {
+          if (k < lit && cells[k].className === "ws-cell") {
+            var isBad = outcome.cells.indexOf(k) !== -1;
+            cells[k].className = isBad ? "ws-cell bad" : "ws-cell ok";
+          }
+        }
+      }
+
+      if (tick >= totalTicks) {
+        wsStopTimer(s);
+        wsFinish(i, outcome);
+      }
+    }, 70);
+  }
+
+  function wsFinish(i, outcome) {
+    var d = WS_DRIVES[i], s = wsState[i], els = wsEls.bays[i];
+    var m = WS_METHODS[s.method];
+    s.running = false;
+    wsTotalCost += m.cost;
+    els.barFill.style.width = "100%";
+    els.phase.textContent = "Done.";
+    if (outcome.pass) {
+      s.done = true;
+      s.status = outcome.destroy ? "destroyed" : "clean";
+      s.cert = { method: s.method, cost: m.cost, caveat: !!outcome.caveat, note: outcome.note };
+      els.result.className = "ws-result " + (outcome.caveat ? "warn" : "good");
+      els.result.textContent = outcome.note + " Cost: $" + m.cost + ".";
+      wsToast(d.name + (outcome.destroy ? ": destroyed" : ": sanitized"));
+    } else {
+      s.status = "failed";
+      s.done = true;
+      s.failNote = outcome.note;
+      els.result.className = "ws-result bad";
+      els.result.textContent = outcome.note + " This drive is not resolved: pick DESTROY and run again.";
+      wsToast(d.name + ": purge failed");
+    }
+    wsRefreshBay(i);
+    wsRefreshAll();
+  }
+
+  function wsRerun(i) {
+    var s = wsState[i], els = wsEls.bays[i];
+    wsStopTimer(s);
+    s.done = false;
+    s.status = "pending";
+    s.running = false;
+    s.cert = null;
+    s.failNote = "";
+    s.method = "DESTROY";
+    els.barFill.style.width = "0%";
+    els.phase.textContent = "";
+    els.result.className = "ws-result";
+    els.result.textContent = "";
+    els.cells.forEach(function (c) { c.className = "ws-cell"; });
+    wsRefreshBay(i);
+  }
+
+  function wsDownload() {
+    var lines = [];
+    lines.push("OLD IRON INTAKE: DRIVE SANITIZATION CERTIFICATES");
+    lines.push("Bench: The Wipe Station, Garage Inventions");
+    lines.push("Standard: NIST Special Publication 800-88 Rev. 1");
+    lines.push("Date: " + new Date().toISOString().slice(0, 10));
+    lines.push("Operator: Emi");
+    lines.push("");
+    WS_DRIVES.forEach(function (d, i) {
+      var s = wsState[i];
+      if (!s.cert) return;
+      var m = WS_METHODS[s.cert.method];
+      lines.push("----------------------------------------");
+      if (s.cert.method === "DESTROY") {
+        lines.push("CERTIFICATE OF DESTRUCTION");
+      } else {
+        lines.push("CERTIFICATE OF SANITIZATION");
+      }
+      lines.push("Drive: " + d.name + " (" + d.cap + ", " + d.iface + ", " + d.media + ")");
+      lines.push("Serial: " + d.sn);
+      lines.push("Method: " + m.label + " (" + s.cert.method + ")");
+      lines.push("Verification: " + (s.cert.method === "DESTROY" ? "not applicable, media shredded" : "read-back, blocks verified"));
+      if (s.cert.caveat) lines.push("CAVEAT: Clear on flash media does not sanitize over-provisioned cells (NIST 800-88).");
+      lines.push("Result: " + (s.cert.method === "DESTROY" ? "destroyed" : "sanitized") + ", $" + s.cert.cost);
+      lines.push("");
+    });
+    lines.push("----------------------------------------");
+    lines.push("Total shop cost: $" + wsTotalCost);
+    lines.push("End of certificates.");
+    var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+    a.download = "wipe-station-certificates.txt";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      (window.URL || window.webkitURL).revokeObjectURL(a.href);
+      a.remove();
+    }, 500);
+    wsToast("Certificates downloaded");
+  }
+
+  function wsBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || ws$("wsBtn")) return;
+
+    var st = document.createElement("style");
+    st.textContent = WS_CSS;
+    document.head.appendChild(st);
+
+    var b = wsEl("button", "secondary", "Run the Wipe Station");
+    b.id = "wsBtn";
+    b.addEventListener("click", function () {
+      ws$("wsOverlay").classList.add("open");
+    });
+    box.appendChild(b);
+
+    var ov = wsEl("div", "ws-overlay");
+    ov.id = "wsOverlay";
+    var panel = wsEl("div", "ws-panel");
+    panel.innerHTML =
+      "<h3>The Wipe Station</h3>" +
+      '<p class="ws-sub">The intake bench for <b>OLD IRON</b>: every retired drive gets a method decision, ' +
+      "verified passes, and a per-serial certificate before it leaves the shop. " +
+      "Pick <b>Clear</b>, <b>Purge</b>, or <b>Destroy</b> per drive, run it, and watch verification. " +
+      "Bad media cannot be purged, it can only be destroyed. That is the whole puzzle.</p>";
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+
+    var mg = wsEl("div", "ws-methods");
+    Object.keys(WS_METHODS).forEach(function (k) {
+      var m = WS_METHODS[k];
+      mg.appendChild(wsEl("div", "ws-method",
+        "<h6>" + m.label + " ($" + m.cost + ")</h6><p>" + wsEsc(m.blurb) + "</p>"));
+    });
+    panel.appendChild(mg);
+
+    var bays = wsEl("div", "ws-bays");
+    wsEls.bays = [];
+    WS_DRIVES.forEach(function (d, i) {
+      var bay = wsEl("div", "ws-bay");
+      var head = wsEl("div", "ws-bayhead");
+      head.appendChild(wsEl("h5", null, wsEsc(d.name)));
+      var status = wsEl("span", "ws-status pending", "PENDING");
+      head.appendChild(status);
+      bay.appendChild(head);
+      bay.appendChild(wsEl("p", "ws-sn", "S/N " + wsEsc(d.sn) + " &middot; " + wsEsc(d.cap) + " &middot; " + wsEsc(d.iface) + " &middot; " + wsEsc(d.media)));
+      bay.appendChild(wsEl("p", "ws-note", wsEsc(d.blurb)));
+
+      var mrow = wsEl("div", "ws-mrow");
+      var btns = [];
+      ["CLEAR", "PURGE", "DESTROY"].forEach(function (mk, bi) {
+        var mb = wsEl("button", bi === 0 ? "on" : "", WS_METHODS[mk].label + " $" + WS_METHODS[mk].cost);
+        mb.addEventListener("click", function () {
+          var s = wsState[i];
+          if (s.running || s.done) return;
+          s.method = mk;
+          wsRefreshBay(i);
+        });
+        btns.push(mb);
+        mrow.appendChild(mb);
+      });
+      bay.appendChild(mrow);
+
+      var phase = wsEl("p", "ws-phase", "");
+      bay.appendChild(phase);
+      var bar = wsEl("div", "ws-bar");
+      var fill = wsEl("i", null, "");
+      bar.appendChild(fill);
+      bay.appendChild(bar);
+
+      var grid = wsEl("div", "ws-grid");
+      var cells = [];
+      for (var c = 0; c < 160; c++) {
+        var cell = wsEl("div", "ws-cell", "");
+        grid.appendChild(cell);
+        cells.push(cell);
+      }
+      bay.appendChild(grid);
+
+      var result = wsEl("p", "ws-result", "");
+      bay.appendChild(result);
+
+      var brow = wsEl("div", "ws-mrow");
+      var run = wsEl("button", "", "Run sanitization");
+      run.style.flex = "1 1 100%";
+      run.addEventListener("click", function () { wsRun(i); });
+      brow.appendChild(run);
+      var rerun = wsEl("button", "", "Reset bay");
+      rerun.style.display = "none";
+      rerun.style.flex = "1 1 100%";
+      rerun.addEventListener("click", function () { wsRerun(i); });
+      brow.appendChild(rerun);
+      bay.appendChild(brow);
+
+      bays.appendChild(bay);
+      wsEls.bays.push({ status: status, methodBtns: btns, run: run, rerun: rerun, phase: phase, barFill: fill, cells: cells, result: result });
+    });
+    panel.appendChild(bays);
+
+    wsEls.banner = wsEl("div", "ws-banner",
+      "<h4>Shift complete</h4><p></p>");
+    panel.appendChild(wsEls.banner);
+    wsEls.bannerDone = false;
+
+    wsEls.summary = wsEl("div", "ws-summary", "");
+    panel.appendChild(wsEls.summary);
+
+    var foot = wsEl("div", "ws-foot");
+    var dl = wsEl("button", "primary", "Download wipe certificates");
+    dl.disabled = true;
+    dl.addEventListener("click", wsDownload);
+    wsEls.dl = dl;
+    var close = wsEl("button", null, "Close");
+    close.addEventListener("click", function () {
+      wsStopAll();
+      ws$("wsOverlay").classList.remove("open");
+    });
+    foot.appendChild(dl);
+    foot.appendChild(close);
+    panel.appendChild(foot);
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", wsBuild);
+    } else {
+      wsBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      WS: {
+        outcome: wsOutcome,
+        DRIVES: WS_DRIVES,
+        METHODS: WS_METHODS
+      }
+    };
+  }
+
+})();
 
 </script>
 </body>
