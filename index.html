@@ -764,6 +764,22 @@
   "failure": "The sling once released early during a calibration dinner and the centerpiece achieved a range of eleven meters, which the log recorded as catering.",
   "transcript": "Release pin set to 45 degrees, stone mass 3 kg, wind calm. <strong>The rock arrived before the paperwork, which is the entire point of the machine.</strong>"
 },
+{
+  "names": [
+    "The Undersize Oracle",
+    "Tolerance Goblin",
+    "Micrometer Confessional"
+  ],
+  "purposes": [
+    "Turns scrap-bin offcuts into parts that are almost, but not quite, the drawing.",
+    "Holds plus or minus a thou on Tuesdays and plus or minus a prayer on Fridays.",
+    "Converts operator confidence directly into chatter marks at a fixed exchange rate."
+  ],
+  "built": "A retired engine lathe, a DRO with one flickering digit, and a shop stool with strong opinions.",
+  "power": "Single-phase 220V and a VFD that hums in a key the building superintendent dislikes.",
+  "failure": "Any attempt to take the last two thou in one pass results in the last two thou, plus interest.",
+  "transcript": "It held size through three finish passes and then the part measured <strong>exactly wrong</strong> in a way that implied intent. I re-cut the setup sheet instead of the part and the next one came in dead nuts. The lathe has never explained itself."
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -6141,6 +6157,631 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", mgBuild);
   } else {
     mgBuild();
+  }
+
+})();
+/* ============================================================
+   THE LATHE ROOM
+   A machinist's bench: turn 25 mm bar stock to blueprint on a
+   manual engine lathe. Cross-slide, spindle RPM, feed, and cut
+   range are real controls; springback, chatter, feed marks, and
+   insert snaps are a real (if simplified) cutting model.
+   Trial 1 is a plain pin; trials 2 and 3 are stepped shafts with
+   tighter tolerance. Cut under size and the part is scrap,
+   because metal does not grow back.
+   Self-contained IIFE, local helpers only, no page globals.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- tiny local helpers (no reliance on page globals) ---------- */
+  function lt$(id) { return document.getElementById(id); }
+  function ltEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function ltToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = lt$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function ltFmt(n, d) { return Number(n).toFixed(d == null ? 2 : d); }
+
+  /* ---------- cutting model (pure logic, no DOM) ---------- */
+  var LT_LEN = 100, LT_N = 50, LT_STOCK = 25.0;
+  var LT_ZC = [];
+  (function () { for (var i = 0; i < LT_N; i++) LT_ZC.push((i + 0.5) * (LT_LEN / LT_N)); })();
+
+  var LT_TRIALS = [
+    { name: "Trial 1: The Pin",
+      desc: "One diameter, full length: 20.00 mm, tolerance plus or minus 0.05. Rough it down in steps, then sneak up with light finish passes.",
+      tol: 0.05, steps: [[0, 100, 20.00]] },
+    { name: "Trial 2: The Shoulder",
+      desc: "A stepped shaft: 22.00 mm for the first 40 mm, 18.00 mm for the rest, plus or minus 0.05. Set the cut range to work one step at a time.",
+      tol: 0.05, steps: [[0, 40, 22.00], [40, 100, 18.00]] },
+    { name: "Trial 3: The Fit",
+      desc: "Three steps at 24.00, 20.00, and 16.00 mm, tolerance plus or minus 0.03. Finish passes only, slow feed, no heroics.",
+      tol: 0.03, steps: [[0, 30, 24.00], [30, 70, 20.00], [70, 100, 16.00]] }
+  ];
+  var LT_SHORT = ["The Pin", "The Shoulder", "The Fit"];
+
+  function ltTarget(ti, z) {
+    var steps = LT_TRIALS[ti].steps;
+    for (var s = 0; s < steps.length; s++) {
+      if (z < steps[s][1]) return steps[s][2];
+    }
+    return steps[steps.length - 1][2];
+  }
+
+  /* Cut one station. Returns "snap", "cut", or "none". rand() in [0,1). */
+  function ltCutStation(dia, i, xdia, rpm, feed, rand) {
+    var d = dia[i] - xdia;
+    if (d <= 0.0005) return "none";
+    if (d > 2.0 + 1e-9) return "snap"; /* epsilon: a displayed 2.00 mm cut must not snap */
+    var nd = xdia + 0.15 * d; /* springback: the bar pushes off the tool */
+    if (d > 0.8 && rpm < 600) nd += (rand() * 0.10 - 0.05); /* chatter wander */
+    if (d <= 0.35 && feed > 0.15) nd += (rand() * 0.04 - 0.02); /* feed witness lines */
+    if (nd > dia[i]) nd = dia[i];
+    dia[i] = nd;
+    return "cut";
+  }
+
+  function ltFreshStock() {
+    var a = [];
+    for (var i = 0; i < LT_N; i++) a.push(LT_STOCK);
+    return a;
+  }
+
+  function ltGrade(ti, dia) {
+    var tol = LT_TRIALS[ti].tol, worst = 0, worstZ = 0, over = 0, scrap = null;
+    for (var i = 0; i < LT_N; i++) {
+      var dev = dia[i] - ltTarget(ti, LT_ZC[i]);
+      if (Math.abs(dev) > Math.abs(worst)) { worst = dev; worstZ = LT_ZC[i]; }
+      if (dev < -tol && !scrap) scrap = { z: LT_ZC[i], dev: dev, act: dia[i] };
+      if (dev > tol) over++;
+    }
+    return { scrap: scrap, over: over, worst: worst, worstZ: worstZ, pass: !scrap && over === 0 };
+  }
+
+  /* ---------- state ---------- */
+  var lt = { trial: 0, animating: false, raf: 0, carriage: null, chips: [], trials: [], wins: [] };
+  (function () {
+    for (var t = 0; t < LT_TRIALS.length; t++) {
+      lt.trials.push({ dia: ltFreshStock(), passes: 0, badge: null, measured: null });
+    }
+  })();
+
+  function ltParams() {
+    var z0 = parseFloat(lt$("ltZ0").value), z1 = parseFloat(lt$("ltZ1").value);
+    if (z0 > z1) { var t = z0; z0 = z1; z1 = t; }
+    return {
+      xdia: parseFloat(lt$("ltX").value),
+      rpm: parseFloat(lt$("ltRpm").value),
+      feed: parseFloat(lt$("ltFeed").value),
+      z0: z0, z1: z1
+    };
+  }
+
+  /* ---------- canvas ---------- */
+  function ltChip(z, xdia) {
+    for (var k = 0; k < 3; k++) {
+      lt.chips.push({
+        z: z, y: xdia / 2,
+        vz: (Math.random() * 14 - 11), vy: -(Math.random() * 5 + 2),
+        life: 26 + Math.random() * 14
+      });
+    }
+    if (lt.chips.length > 220) lt.chips.splice(0, lt.chips.length - 220);
+  }
+
+  function ltDraw() {
+    var cv = lt$("ltCanvas");
+    if (!cv || !cv.getContext) return;
+    var ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height;
+    var ti = lt.trial, st = lt.trials[ti], tol = LT_TRIALS[ti].tol;
+    var p = { xdia: 23, z0: 0, z1: 100 };
+    try { p = ltParams(); } catch (e) { /* elements not built yet */ }
+    var x0 = 64, x1 = W - 24, ym = H / 2, S = 10;
+    function X(z) { return x0 + (z / LT_LEN) * (x1 - x0); }
+
+    ctx.fillStyle = "#060b0c";
+    ctx.fillRect(0, 0, W, H);
+
+    /* machine bed */
+    ctx.fillStyle = "#0c1312";
+    ctx.fillRect(0, ym + 13.4 * S, W, H - (ym + 13.4 * S));
+
+    /* Z ruler */
+    ctx.fillStyle = "#5b6d69";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    for (var rz = 0; rz <= 100; rz += 20) {
+      ctx.fillRect(X(rz) - 0.5, H - 26, 1, 8);
+      ctx.fillText(rz + "", X(rz), H - 12);
+    }
+    ctx.textAlign = "left";
+    ctx.fillText("Z mm", x0, H - 30);
+
+    /* chuck */
+    ctx.fillStyle = "#1b2624";
+    ctx.fillRect(10, ym - 62, x0 - 18, 124);
+    ctx.strokeStyle = "#2a3b37";
+    ctx.strokeRect(10.5, ym - 61.5, x0 - 19, 123);
+    ctx.fillStyle = "#5b6d69";
+    ctx.fillText("CHUCK", 14, ym - 66);
+
+    /* target profile, dashed acid */
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "rgba(199,255,56,.75)";
+    ctx.lineWidth = 1;
+    var steps = LT_TRIALS[ti].steps;
+    for (var s = 0; s < steps.length; s++) {
+      var yt = ym - (steps[s][2] / 2) * S, yb = ym + (steps[s][2] / 2) * S;
+      ctx.beginPath(); ctx.moveTo(X(steps[s][0]), yt); ctx.lineTo(X(steps[s][1]), yt); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(X(steps[s][0]), yb); ctx.lineTo(X(steps[s][1]), yb); ctx.stroke();
+    }
+    ctx.restore();
+
+    /* the bar, station by station, tinted by tolerance state */
+    var sw = (x1 - x0) / LT_N;
+    for (var i = 0; i < LT_N; i++) {
+      var dia = st.dia[i], dev = dia - ltTarget(ti, LT_ZC[i]);
+      var top = ym - (dia / 2) * S, h = dia * S, lx = X(LT_ZC[i]) - sw / 2;
+      ctx.fillStyle = "#46564f";
+      ctx.fillRect(lx, top, Math.max(1, sw - 0.6), h);
+      if (dev < -tol) ctx.fillStyle = "rgba(255,70,104,.6)";
+      else if (dev > tol) ctx.fillStyle = "rgba(255,107,44,.5)";
+      else ctx.fillStyle = "rgba(199,255,56,.38)";
+      ctx.fillRect(lx, top, Math.max(1, sw - 0.6), h);
+    }
+
+    /* center line */
+    ctx.strokeStyle = "rgba(90,110,106,.5)";
+    ctx.beginPath(); ctx.moveTo(x0, ym); ctx.lineTo(x1, ym); ctx.stroke();
+
+    /* cross-slide setting across the cut range */
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = "rgba(255,107,44,.9)";
+    var xy = ym - (p.xdia / 2) * S;
+    ctx.beginPath(); ctx.moveTo(X(p.z0), xy); ctx.lineTo(X(p.z1), xy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(p.z0), 2 * ym - xy); ctx.lineTo(X(p.z1), 2 * ym - xy); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = "#ff6b2c";
+    ctx.fillText("XD " + ltFmt(p.xdia) + " mm", X(p.z1) + 4 > x1 - 90 ? x1 - 90 : X(p.z1) + 4, xy - 6);
+
+    /* tool at the carriage */
+    if (lt.carriage != null) {
+      var tx = X(lt.carriage), ty = ym - (p.xdia / 2) * S;
+      ctx.fillStyle = "#ff6b2c";
+      ctx.beginPath();
+      ctx.moveTo(tx, ty); ctx.lineTo(tx + 12, ty - 2); ctx.lineTo(tx + 12, ty - 12); ctx.lineTo(tx, ty - 10);
+      ctx.closePath(); ctx.fill();
+      ctx.fillRect(tx + 10, ty - 34, 7, 24);
+    }
+
+    /* chips */
+    ctx.fillStyle = "#ffb02c";
+    for (var c = 0; c < lt.chips.length; c++) {
+      var ch = lt.chips[c];
+      ctx.globalAlpha = Math.max(0, Math.min(1, ch.life / 30));
+      ctx.fillRect(X(ch.z) - 1, ym - ch.y * S - 1, 2.5, 2.5);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- readouts ---------- */
+  function ltRefresh() {
+    var p;
+    try { p = ltParams(); } catch (e) { return; }
+    lt$("ltXVal").textContent = ltFmt(p.xdia) + " mm";
+    lt$("ltRpmVal").textContent = p.rpm + " rpm";
+    lt$("ltFeedVal").textContent = ltFmt(p.feed) + " mm/rev";
+    lt$("ltZ0Val").textContent = "Z " + p.z0 + " mm";
+    lt$("ltZ1Val").textContent = "Z " + p.z1 + " mm";
+
+    for (var t = 0; t < 3; t++) {
+      var tab = lt$("ltTab" + t), bst = lt.trials[t].badge;
+      tab.className = "lt-tab" + (t === lt.trial ? " active" : "") +
+        (bst === "pass" ? " pass" : bst === "fail" ? " fail" : "");
+      tab.innerHTML = LT_SHORT[t] + '<span class="lt-tab-badge">' +
+        (bst ? bst.toUpperCase() : "NOT RUN") + "</span>";
+    }
+
+    var tr = LT_TRIALS[lt.trial];
+    lt$("ltBlueprint").innerHTML =
+      "<h6>Blueprint: " + tr.name + " (tolerance plus or minus " + ltFmt(tr.tol) + " mm)</h6>" +
+      tr.steps.map(function (s) {
+        return '<div class="lt-step"><span>Z ' + s[0] + " to " + s[1] + ' mm</span><b>' + ltFmt(s[2]) + " mm</b></div>";
+      }).join("") +
+      "<p>" + tr.desc + "</p>";
+
+    var st = lt.trials[lt.trial], deep = 0, deepZ = 0;
+    for (var i = 0; i < LT_N; i++) {
+      if (LT_ZC[i] < p.z0 || LT_ZC[i] > p.z1) continue;
+      var d = st.dia[i] - p.xdia;
+      if (d > deep) { deep = d; deepZ = LT_ZC[i]; }
+    }
+    var ph;
+    if (deep <= 0.0005) {
+      ph = '<div class="t"><h6>Cut</h6><p class="dim">No cut: the cross-slide sits above the bar. Dial it in.</p></div>';
+    } else {
+      var warn;
+      if (deep > 2.0) warn = '<div class="t"><h6>Insert</h6><p class="bad">WILL SNAP past the 2.00 mm limit. Back the cross-slide out.</p></div>';
+      else if (deep > 0.8 && p.rpm < 600) warn = '<div class="t"><h6>Chatter</h6><p class="warn">Heavy cut under 600 rpm will chatter and wander. Raise RPM or lighten up.</p></div>';
+      else if (deep <= 0.35 && p.feed > 0.15) warn = '<div class="t"><h6>Finish</h6><p class="warn">Fast feed on a finish pass leaves witness lines. Drop to 0.15 mm/rev or below.</p></div>';
+      else warn = '<div class="t"><h6>Springback</h6><p class="good">Expect about ' + ltFmt(0.15 * deep) +
+        " mm of springback. Finish passes under 0.35 mm sneak up on size.</p></div>";
+      ph = '<div class="t"><h6>Deepest cut</h6><p>' + ltFmt(deep) + " mm at Z " + ltFmt(deepZ, 0) + " mm</p></div>" + warn;
+    }
+    lt$("ltPred").innerHTML = ph;
+
+    var tel = '<div class="t"><h6>Passes</h6><p>' + st.passes + "</p></div>";
+    if (st.measured) {
+      tel += '<div class="t"><h6>Stations in tol</h6><p>' + st.measured.inTol + " / " + LT_N + "</p></div>";
+      tel += '<div class="t"><h6>Worst deviation</h6><p>' + (st.measured.worst >= 0 ? "+" : "") +
+        ltFmt(st.measured.worst) + " mm</p></div>";
+    } else {
+      tel += '<div class="t"><h6>Stations in tol</h6><p class="dim">measure first</p></div>' +
+        '<div class="t"><h6>Worst deviation</h6><p class="dim">measure first</p></div>';
+    }
+    lt$("ltTel").innerHTML = tel;
+
+    if (lt.trials.every(function (s) { return s.badge === "pass"; })) {
+      lt$("ltCertBtn").style.display = "";
+    }
+    ltDraw();
+  }
+
+  /* ---------- actions ---------- */
+  function ltTakePass() {
+    if (lt.animating) { ltToast("Hold still: a pass is already running."); return; }
+    var p = ltParams(), st = lt.trials[lt.trial];
+    if (p.z1 - p.z0 < 1) { ltToast("Cut range is empty."); return; }
+    var dur = Math.max(600, 1700 * ((p.z1 - p.z0) / 100) * (0.12 / p.feed));
+    var t0 = null, cutDone = {};
+    lt.animating = true;
+    lt.carriage = p.z0;
+    lt.chips = [];
+    lt$("ltMeasWrap").style.display = "none";
+    function frame(ts) {
+      if (!t0) t0 = ts;
+      var k = Math.min(1, (ts - t0) / dur);
+      var z = p.z0 + (p.z1 - p.z0) * k;
+      lt.carriage = z;
+      for (var i = 0; i < LT_N; i++) {
+        if (!cutDone[i] && LT_ZC[i] <= z && LT_ZC[i] >= p.z0 - 0.001) {
+          cutDone[i] = true;
+          var r = ltCutStation(st.dia, i, p.xdia, p.rpm, p.feed, Math.random);
+          if (r === "snap") { ltSnap(st, i); return; }
+          if (r === "cut") ltChip(LT_ZC[i], p.xdia);
+        }
+      }
+      for (var c = lt.chips.length - 1; c >= 0; c--) {
+        var ch = lt.chips[c];
+        ch.z += ch.vz * 0.016; ch.y += ch.vy * 0.016; ch.vy += 0.35; ch.life--;
+        if (ch.life <= 0) lt.chips.splice(c, 1);
+      }
+      ltDraw();
+      if (k < 1) { lt.raf = requestAnimationFrame(frame); }
+      else {
+        lt.animating = false;
+        lt.carriage = null;
+        lt.chips = [];
+        st.passes++;
+        st.measured = null;
+        ltDraw();
+        ltRefresh();
+        ltToast("Pass complete: " + st.passes + (st.passes === 1 ? " pass" : " passes") + " on this setup.");
+      }
+    }
+    lt.raf = requestAnimationFrame(frame);
+  }
+
+  function ltSnap(st, i) {
+    cancelAnimationFrame(lt.raf);
+    lt.animating = false;
+    lt.carriage = null;
+    lt.chips = [];
+    st.badge = "fail";
+    st.measured = null;
+    var res = lt$("ltResult");
+    res.className = "lt-result fail";
+    res.textContent = "INSERT SNAPPED at Z " + ltFmt(LT_ZC[i], 0) + " mm: the cut ran past the 2.00 mm limit. " +
+      "Back the cross-slide out, re-rig a fresh bar, and work down in steps.";
+    ltToast("Snap. That insert had a family.");
+    ltRefresh();
+  }
+
+  function ltMeasure() {
+    if (lt.animating) { ltToast("Hold still: a pass is running."); return; }
+    var ti = lt.trial, st = lt.trials[ti], tol = LT_TRIALS[ti].tol;
+    var rows = "", inTol = 0, worst = 0, n = 0;
+    for (var z = 5; z <= 95; z += 10) {
+      var i = (z - 1) / 2, tgt = ltTarget(ti, LT_ZC[i]), act = st.dia[i], dev = act - tgt;
+      n++;
+      var ok = Math.abs(dev) <= tol;
+      if (ok) inTol++;
+      if (Math.abs(dev) > Math.abs(worst)) worst = dev;
+      rows += "<tr><td>" + z + "</td><td>" + ltFmt(tgt) + "</td><td>" + ltFmt(act) + "</td>" +
+        '<td class="' + (ok ? "ok" : dev < 0 ? "under" : "over") + '">' +
+        (dev >= 0 ? "+" : "") + ltFmt(dev) + "</td>" +
+        '<td class="' + (ok ? "ok" : "no") + '">' + (ok ? "IN" : "OUT") + "</td></tr>";
+    }
+    st.measured = { inTol: Math.round(inTol / n * LT_N), worst: worst };
+    lt$("ltMeas").innerHTML =
+      '<table><thead><tr><th>Z mm</th><th>Print</th><th>Mic</th><th>Dev</th><th></th></tr></thead><tbody>' +
+      rows + "</tbody></table>";
+    lt$("ltMeasWrap").style.display = "";
+    ltRefresh();
+    ltToast("Micrometer says " + inTol + " of " + n + " stations in tolerance.");
+  }
+
+  function ltSubmit() {
+    if (lt.animating) { ltToast("Hold still: a pass is running."); return; }
+    var ti = lt.trial, st = lt.trials[ti], tol = LT_TRIALS[ti].tol;
+    var g = ltGrade(ti, st.dia), res = lt$("ltResult");
+    if (g.scrap) {
+      st.badge = "fail";
+      res.className = "lt-result fail";
+      res.textContent = "SCRAP. Z " + ltFmt(g.scrap.z, 0) + " mm measures " + ltFmt(g.scrap.act) +
+        " mm, " + ltFmt(-g.scrap.dev) + " mm under the low limit. Metal does not grow back: re-rig a fresh bar and try again.";
+      ltToast("Scrapped. The bin is hungry today.");
+    } else if (g.over > 0) {
+      res.className = "lt-result";
+      res.textContent = "Not yet: " + g.over + " of " + LT_N + " stations still oversize (worst +" +
+        ltFmt(g.worst) + " mm at Z " + ltFmt(g.worstZ, 0) + " mm). Dial in and keep cutting.";
+      ltToast("Still oversize. Keep cutting.");
+    } else {
+      st.badge = "pass";
+      res.className = "lt-result win";
+      res.textContent = "BLUEPRINT HELD. All " + LT_N + " stations within plus or minus " + ltFmt(tol) +
+        " mm after " + st.passes + " passes. Trial logged.";
+      ltToast("To tolerance. Nice work, machinist.");
+      var p = ltParams();
+      var dup = false;
+      for (var w = 0; w < lt.wins.length; w++) if (lt.wins[w].t === ti) dup = true;
+      if (!dup) lt.wins.push({ t: ti, passes: st.passes, rpm: p.rpm, feed: p.feed });
+    }
+    ltRefresh();
+  }
+
+  function ltRerig() {
+    if (lt.animating) { ltToast("Hold still: a pass is running."); return; }
+    var st = lt.trials[lt.trial];
+    st.dia = ltFreshStock();
+    st.passes = 0;
+    st.measured = null;
+    lt$("ltMeasWrap").style.display = "none";
+    lt$("ltResult").className = "lt-result";
+    lt$("ltResult").textContent = "Fresh 25.00 mm bar chucked up. Dial in and take a pass.";
+    ltToast("Fresh bar chucked up.");
+    ltRefresh();
+  }
+
+  function ltSetTrial(i) {
+    if (lt.animating) { ltToast("Finish the pass first."); return; }
+    lt.trial = i;
+    lt.carriage = null;
+    lt.chips = [];
+    lt$("ltMeasWrap").style.display = "none";
+    lt$("ltResult").className = "lt-result";
+    lt$("ltResult").textContent = LT_TRIALS[i].name + " loaded. Dial in and take a pass.";
+    ltRefresh();
+  }
+
+  function ltCert() {
+    var lines = lt.wins.map(function (w) {
+      return LT_TRIALS[w.t].name + ": " + w.passes + " passes, " + w.rpm +
+        " rpm, " + ltFmt(w.feed) + " mm/rev feed";
+    });
+    var txt =
+      "MACHINIST CERTIFICATE\n" +
+      "Garage Inventions Lathe Room\n" +
+      "================================\n" +
+      "Date   : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Result : ALL THREE BLUEPRINTS TURNED TO TOLERANCE\n" +
+      "Stock  : 25.00 mm bar, manual engine lathe\n" +
+      "\nWinning setups:\n" + lines.join("\n") + "\n" +
+      "\nOne pin, one shoulder, one three-step fit.\n" +
+      "No scrap was harmed in the making of this certificate.\n" +
+      "(One insert was. It is missed.)\n" +
+      "\nSigned by the micrometer. The chips do not lie.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "lathe-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    ltToast("Machinist certificate downloaded");
+  }
+
+  /* ---------- build ---------- */
+  function ltBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || lt$("ltBtn")) return;
+
+    var css = [
+      ".lt-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".lt-overlay.open{display:flex;}",
+      ".lt-panel{width:min(920px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+      ".lt-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".lt-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+      ".lt-tabs{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;}",
+      ".lt-tab{flex:1;min-width:150px;min-height:48px;padding:8px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);display:flex;flex-direction:column;gap:4px;align-items:center;justify-content:center;}",
+      ".lt-tab.active{border-color:var(--cyan);}",
+      ".lt-tab.pass{border-color:var(--acid);}",
+      ".lt-tab.fail{border-color:#ff4668;}",
+      ".lt-tab-badge{font-family:monospace;font-size:9px;letter-spacing:.14em;color:#72827f;}",
+      ".lt-tab.pass .lt-tab-badge{color:var(--acid);}",
+      ".lt-tab.fail .lt-tab-badge{color:#ff8ba0;}",
+      ".lt-blue{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;margin-bottom:10px;}",
+      ".lt-blue h6{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+      ".lt-step{display:flex;justify-content:space-between;font-family:monospace;font-size:12px;color:var(--ink);padding:2px 0;}",
+      ".lt-step b{color:var(--acid);}",
+      ".lt-blue p{margin:8px 0 0;font-size:11px;color:var(--ink);line-height:1.6;}",
+      ".lt-sliders{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:10px;}",
+      ".lt-ctl{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+      ".lt-ctl h6{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+      ".lt-ctl .val{font-family:monospace;font-size:13px;color:var(--ink);margin-bottom:6px;}",
+      ".lt-ctl input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+      ".lt-jogs{display:flex;gap:6px;flex-wrap:wrap;}",
+      ".lt-jog{flex:1;min-width:56px;min-height:40px;font-family:monospace;font-size:12px;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".lt-pred{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".lt-pred .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+      ".lt-pred .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".lt-pred .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+      ".lt-pred .t p.dim{color:#72827f;}",
+      ".lt-pred .t p.warn{color:var(--orange);}",
+      ".lt-pred .t p.bad{color:#ff8ba0;}",
+      ".lt-pred .t p.good{color:var(--acid);}",
+      ".lt-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+      ".lt-stage canvas{display:block;width:100%;height:auto;}",
+      ".lt-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".lt-actions button{min-height:48px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".lt-go{border-color:var(--orange) !important;color:var(--orange) !important;}",
+      ".lt-tel{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".lt-tel .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+      ".lt-tel .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".lt-tel .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+      ".lt-tel .t p.dim{color:#72827f;}",
+      ".lt-meas{margin-bottom:10px;border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+      ".lt-meas h6{margin:0 0 8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+      ".lt-meas table{width:100%;border-collapse:collapse;font-family:monospace;font-size:12px;}",
+      ".lt-meas th,.lt-meas td{border:1px solid var(--line);padding:5px 8px;text-align:right;color:var(--ink);}",
+      ".lt-meas th{color:#7c8d89;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.08em;}",
+      ".lt-meas td.ok{color:var(--acid);}",
+      ".lt-meas td.under{color:#ff8ba0;}",
+      ".lt-meas td.over{color:var(--orange);}",
+      ".lt-meas td.no{color:#72827f;}",
+      ".lt-result{padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;color:var(--ink);}",
+      ".lt-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".lt-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".lt-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+      ".lt-foot .secondary{flex:1;min-height:44px;}",
+      "@media (max-width:640px){.lt-sliders{grid-template-columns:1fr;}.lt-actions{grid-template-columns:1fr 1fr;}.lt-pred{grid-template-columns:1fr;}.lt-tel{grid-template-columns:1fr;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = ltEl("button", "secondary", "Open the Lathe Room");
+    b.id = "ltBtn";
+    b.addEventListener("click", function () {
+      lt$("ltOverlay").classList.add("open");
+      ltRefresh();
+    });
+    box.appendChild(b);
+
+    var tabsHtml = LT_SHORT.map(function (n, i) {
+      return '<button class="lt-tab" id="ltTab' + i + '">' + n + "</button>";
+    }).join("");
+
+    var ov = ltEl("div", "lt-overlay");
+    ov.id = "ltOverlay";
+    ov.innerHTML =
+      '<div class="lt-panel" role="dialog" aria-label="The Lathe Room machinist bench">' +
+      "<h3>The Lathe Room</h3>" +
+      '<p class="lt-sub">A manual engine lathe and three blueprints. Dial the cross-slide, pick RPM and feed, set the cut range, and take passes. Springback is real: rough it close, then sneak up with finish passes. Cut under size and the part is scrap, because metal does not grow back.</p>' +
+      '<div class="lt-tabs">' + tabsHtml + "</div>" +
+      '<div class="lt-blue" id="ltBlueprint"></div>' +
+      '<div class="lt-sliders">' +
+      '<div class="lt-ctl"><h6>Cross-slide (diameter)</h6><div class="val" id="ltXVal"></div>' +
+      '<input type="range" id="ltX" min="10" max="25" step="0.05" value="23" aria-label="Cross-slide diameter in millimeters">' +
+      '<div class="lt-jogs">' +
+      '<button class="lt-jog" data-d="-0.10">-0.10</button>' +
+      '<button class="lt-jog" data-d="-0.02">-0.02</button>' +
+      '<button class="lt-jog" data-d="0.02">+0.02</button>' +
+      '<button class="lt-jog" data-d="0.10">+0.10</button>' +
+      "</div></div>" +
+      '<div class="lt-ctl"><h6>Spindle RPM</h6><div class="val" id="ltRpmVal"></div>' +
+      '<input type="range" id="ltRpm" min="100" max="1500" step="50" value="800" aria-label="Spindle speed in revolutions per minute"></div>' +
+      '<div class="lt-ctl"><h6>Feed</h6><div class="val" id="ltFeedVal"></div>' +
+      '<input type="range" id="ltFeed" min="0.05" max="0.30" step="0.01" value="0.12" aria-label="Feed in millimeters per revolution"></div>' +
+      '<div class="lt-ctl"><h6>Cut from (Z)</h6><div class="val" id="ltZ0Val"></div>' +
+      '<input type="range" id="ltZ0" min="0" max="100" step="2" value="0" aria-label="Cut start position in millimeters"></div>' +
+      '<div class="lt-ctl"><h6>Cut to (Z)</h6><div class="val" id="ltZ1Val"></div>' +
+      '<input type="range" id="ltZ1" min="0" max="100" step="2" value="100" aria-label="Cut end position in millimeters"></div>' +
+      '<div class="lt-ctl"><h6>Shop notes</h6><div class="val" style="font-size:11px;line-height:1.7;color:#9aacaa;">' +
+      "Insert limit 2.00 mm per pass. Chatter past 0.80 mm under 600 rpm. " +
+      "Finish feed at or under 0.15 mm/rev. The dashed acid line is the print; green stations are in tolerance.</div></div>" +
+      "</div>" +
+      '<div class="lt-pred" id="ltPred"></div>' +
+      '<div class="lt-stage"><canvas id="ltCanvas" width="860" height="300"></canvas></div>' +
+      '<div class="lt-actions">' +
+      '<button id="ltPass" class="lt-go">Take pass</button>' +
+      '<button id="ltMeasureBtn" class="secondary">Measure</button>' +
+      '<button id="ltSubmit" class="secondary">Submit part</button>' +
+      '<button id="ltRerig" class="secondary">Re-rig</button>' +
+      "</div>" +
+      '<div class="lt-tel" id="ltTel"></div>' +
+      '<div class="lt-meas" id="ltMeasWrap" style="display:none;"><h6>Micrometer readings</h6><div id="ltMeas"></div></div>' +
+      '<div class="lt-result" id="ltResult">Chuck a blueprint and take a pass.</div>' +
+      '<div class="lt-foot">' +
+      '<button id="ltCertBtn" class="secondary" style="display:none;">Download machinist certificate</button>' +
+      '<button id="ltClose" class="secondary">Close</button>' +
+      "</div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    ["ltX", "ltRpm", "ltFeed", "ltZ0", "ltZ1"].forEach(function (id) {
+      lt$(id).addEventListener("input", ltRefresh);
+    });
+    var jogs = ov.querySelectorAll(".lt-jog");
+    for (var j = 0; j < jogs.length; j++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          var x = lt$("ltX");
+          var v = Math.round((parseFloat(x.value) + parseFloat(btn.getAttribute("data-d"))) * 100) / 100;
+          x.value = Math.max(10, Math.min(25, v));
+          ltRefresh();
+        });
+      })(jogs[j]);
+    }
+    for (var t = 0; t < 3; t++) {
+      (function (ti) {
+        lt$("ltTab" + ti).addEventListener("click", function () { ltSetTrial(ti); });
+      })(t);
+    }
+    lt$("ltPass").addEventListener("click", ltTakePass);
+    lt$("ltMeasureBtn").addEventListener("click", ltMeasure);
+    lt$("ltSubmit").addEventListener("click", ltSubmit);
+    lt$("ltRerig").addEventListener("click", ltRerig);
+    lt$("ltCertBtn").addEventListener("click", ltCert);
+    lt$("ltClose").addEventListener("click", function () {
+      lt$("ltOverlay").classList.remove("open");
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && lt$("ltOverlay").classList.contains("open") && !lt.animating) {
+        lt$("ltOverlay").classList.remove("open");
+      }
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ltBuild);
+  } else {
+    ltBuild();
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      ltCutStation: ltCutStation,
+      ltTarget: ltTarget,
+      ltGrade: ltGrade,
+      ltFreshStock: ltFreshStock,
+      LT_TRIALS: LT_TRIALS,
+      LT_ZC: LT_ZC,
+      LT_N: LT_N
+    };
   }
 
 })();

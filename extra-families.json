@@ -222,5 +222,21 @@
     "power": "Runs on twisted rope and the quiet confidence that gravity always shows up for work.",
     "failure": "The sling once released early during a calibration dinner and the centerpiece achieved a range of eleven meters, which the log recorded as catering.",
     "transcript": "Release pin set to 45 degrees, stone mass 3 kg, wind calm. <strong>The rock arrived before the paperwork, which is the entire point of the machine.</strong>"
+  },
+  {
+    "names": [
+      "The Undersize Oracle",
+      "Tolerance Goblin",
+      "Micrometer Confessional"
+    ],
+    "purposes": [
+      "Turns scrap-bin offcuts into parts that are almost, but not quite, the drawing.",
+      "Holds plus or minus a thou on Tuesdays and plus or minus a prayer on Fridays.",
+      "Converts operator confidence directly into chatter marks at a fixed exchange rate."
+    ],
+    "built": "A retired engine lathe, a DRO with one flickering digit, and a shop stool with strong opinions.",
+    "power": "Single-phase 220V and a VFD that hums in a key the building superintendent dislikes.",
+    "failure": "Any attempt to take the last two thou in one pass results in the last two thou, plus interest.",
+    "transcript": "It held size through three finish passes and then the part measured <strong>exactly wrong</strong> in a way that implied intent. I re-cut the setup sheet instead of the part and the next one came in dead nuts. The lathe has never explained itself."
   }
 ]
