@@ -11716,6 +11716,10 @@ function gyScoreLift(st) {
     ".ph-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}",
     ".ph-foot .secondary,.ph-foot .primary{flex:1;min-height:44px;}",
     ".ph-foot .primary{border-color:var(--acid);color:var(--acid);}",
+    ".ph-overlay .primary{width:auto;min-width:0;margin-top:0;background:transparent;border:1px solid var(--acid);color:var(--acid);font-family:inherit;font-size:11px;font-weight:400;letter-spacing:.06em;padding:10px 12px;overflow:visible;}",
+    ".ph-overlay .primary::after{display:none;}",
+    ".ph-overlay button{white-space:normal;line-height:1.5;overflow-wrap:anywhere;}",
+    ".ph-toolbar .primary{min-width:0;}",
     "@media (max-width:900px){",
     ".ph-main{grid-template-columns:1fr;}",
     ".ph-regmem{grid-template-columns:1fr;}",
@@ -11731,6 +11735,8 @@ function gyScoreLift(st) {
     ".ph-gutter div{height:25.6px;}",
     ".ph-toolbar select{font-size:16px;}",
     ".ph-regtable{columns:1;}",
+    ".ph-foot{flex-direction:column;}",
+    ".ph-foot .secondary,.ph-foot .primary{flex:none;width:100%;}",
     "}"
   ].join("\n");
 
