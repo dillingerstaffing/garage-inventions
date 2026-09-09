@@ -796,6 +796,22 @@
   "failure": "If any mating pair fails to total exactly 26 teeth, it seizes in protest and refuses to turn until the math is corrected.",
   "transcript": "It counted the teeth on the new pinion <strong>three times</strong> before allowing the mesh, then ran the train up to speed and held 150 RPM within a rounding error. The certificate printed itself. I framed it."
 },
+{
+  "names": [
+    "Pressure Sommelier",
+    "Crown Sheet Confessor",
+    "Whistle Interpreter"
+  ],
+  "purposes": [
+    "Holds steam between 110 and 160 psi for a full shift and can tell, by the gauge needle's tremor, whether the mill is drawing or merely thinking about it.",
+    "Keeps one eye on the water glass at all times and has never, in forty years, let a crown sheet go dry. It will tell you this within minutes of meeting you.",
+    "Translates mill whistle patterns into shovel schedules with a documented accuracy of 97 percent, and judges firemen who cannot."
+  ],
+  "built": "A Lancashire boiler of uncertain age, a brass pressure gauge that reads three psi optimistic out of politeness, a shovel worn to a spoon, and a damper with two positions: committed and regretful.",
+  "power": "Coal, delivered twice per shift by a wagon that is always exactly on time except when it matters.",
+  "failure": "Past 205 psi it does not fail so much as redecorate the county. The safety valve lifts at 192 and screams, which counts as a warning exactly once.",
+  "transcript": "The whistle blew for line two and it had the damper open <strong>before the echo faded</strong>. Held 135 through the whole draw, never touched the blowdown, and the safety valve stayed asleep. I have never been prouder of a machine."
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -7306,6 +7322,607 @@ if (document.readyState === "loading") {
       gsRotations: gsRotations,
       GS_TRIALS: GS_TRIALS,
       GS_MESH_SUM: GS_MESH_SUM
+    };
+  }
+
+})();
+/* ============================================================
+   THE BOILER ROOM
+   A real-time steam boiler management game. Two minutes on the
+   shovel: keep pressure in the green band, keep water on the
+   glass, answer the mill's whistle. Explosion, dry boiler, and
+   stall are all real fail states. Pure sim functions below are
+   shared verbatim with the node test harness.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- local helpers (never touch outer scope) ---------- */
+  var br$ = function (id) { return document.getElementById(id); };
+  function brEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function brToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = br$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function brEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function brMMSS(t) {
+    t = Math.max(0, Math.floor(t));
+    var m = Math.floor(t / 60), s = t % 60;
+    return (m < 10 ? "0" + m : "" + m) + ":" + (s < 10 ? "0" + s : "" + s);
+  }
+
+  /* ---------- pure simulation (verbatim from tested sim) ---------- */
+  var BR_LEN = 120;
+  var BR_GREEN_LO = 110, BR_GREEN_HI = 160;
+  var BR_BOOM = 205, BR_VALVE = 192, BR_STALL = 45;
+
+  function brRng(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function brNewShift(seed) {
+    var rng = brRng(seed);
+    var times = [15, 42, 68, 94];
+    var types = ["mill", "mill", "mill", "quiet"];
+    var i, j, tmp;
+    for (i = types.length - 1; i > 0; i--) {
+      j = Math.floor(rng() * (i + 1));
+      tmp = types[i]; types[i] = types[j]; types[j] = tmp;
+    }
+    var sched = [];
+    for (i = 0; i < 4; i++) {
+      var at = times[i] + (rng() * 10 - 5);
+      if (types[i] === "mill") {
+        sched.push({
+          at: at, dur: 15 + rng() * 7,
+          demand: 0.68 + rng() * 0.2,
+          kind: "mill",
+          name: "the mill whistle blows: line " + (1 + Math.floor(rng() * 3)) + " is drawing hard steam"
+        });
+      } else {
+        sched.push({
+          at: at, dur: 14, demand: 0.08, kind: "quiet",
+          name: "night draw: the mill throttles back. Mind the needle climbing."
+        });
+      }
+    }
+    sched.sort(function (a, b) { return a.at - b.at; });
+    return {
+      seed: seed, t: 0, P: 130, W: 70, coal: 100, fire: 0.3,
+      damper: false, feed: false,
+      sched: sched, log: [], warned: {},
+      greenT: 0, stallT: 0, lifted: false,
+      del1: false, del2: false,
+      over: false, won: false, reason: ""
+    };
+  }
+
+  function brDemandAt(s) {
+    for (var i = 0; i < s.sched.length; i++) {
+      var e = s.sched[i];
+      if (s.t >= e.at && s.t <= e.at + e.dur) return e.demand;
+    }
+    return 0.22;
+  }
+
+  function brLog(s, msg) {
+    s.log.push({ t: s.t, msg: msg });
+    if (s.log.length > 40) s.log.shift();
+  }
+
+  function brStep(s, inp, dt) {
+    if (s.over) return s;
+    if (dt <= 0) return s;
+    if (dt > 0.1) dt = 0.1;
+
+    var stoke = !!(inp && inp.stoke);
+    var blow = !!(inp && inp.blow);
+
+    if (stoke && s.coal > 0) {
+      s.fire = Math.min(1, s.fire + 0.55 * dt);
+      s.coal = Math.max(0, s.coal - 4.5 * dt);
+    }
+    s.fire = Math.max(0, s.fire - s.fire * (s.damper ? 0.11 : 0.055) * dt);
+
+    var demand = brDemandAt(s);
+    var HF = s.damper ? 6.5 : 4.2;
+    var dP = (s.fire * HF - demand * 5.0) * dt;
+    if (s.feed) dP -= 0.9 * dt;
+    if (blow) dP -= 6.0 * dt;
+    s.P += dP;
+
+    if (s.P >= BR_VALVE) {
+      s.P -= 2.5 * dt;
+      if (!s.lifted) {
+        s.lifted = true;
+        brLog(s, "SAFETY VALVE LIFTED at " + Math.round(s.P) + " psi. She is screaming: ease the fire.");
+      }
+    }
+
+    var dW = (s.feed ? 4.5 : 0) * dt - (s.fire * 3.2 + 0.35) * dt;
+    if (blow) dW -= 9.0 * dt;
+    s.W += dW;
+    if (s.W < 0) s.W = 0;
+    if (s.W > 100) s.W = 100;
+
+    if (!s.del1 && s.t >= 40) { s.del1 = true; s.coal = Math.min(100, s.coal + 45); brLog(s, "Coal wagon arrived: bunker topped up."); }
+    if (!s.del2 && s.t >= 80) { s.del2 = true; s.coal = Math.min(100, s.coal + 45); brLog(s, "Second coal wagon arrived: bunker topped up."); }
+
+    var i, e;
+    for (i = 0; i < s.sched.length; i++) {
+      e = s.sched[i];
+      if (!s.warned[i] && s.t >= e.at - 6 && s.t < e.at) {
+        s.warned[i] = true;
+        brLog(s, "Fireman hears it early: " + e.name + ".");
+      }
+    }
+
+    if (s.P >= BR_GREEN_LO && s.P <= BR_GREEN_HI) s.greenT += dt;
+    if (s.P < BR_STALL) s.stallT += dt; else s.stallT = Math.max(0, s.stallT - 2 * dt);
+
+    s.t += dt;
+
+    if (s.P >= BR_BOOM) {
+      s.over = true; s.won = false;
+      s.reason = "BOILER EXPLOSION at " + Math.round(s.P) + " psi. The crown sheet let go and the roof is now a skylight.";
+    } else if (s.W <= 0) {
+      s.over = true; s.won = false;
+      s.reason = "DRY BOILER. The water dropped off the glass and the crown sheet burned. She will never steam again.";
+    } else if (s.stallT > 8) {
+      s.over = true; s.won = false;
+      s.reason = "ENGINE STALLED. Pressure fell below 45 psi for too long and the mill ground to a halt.";
+    } else if (s.t >= BR_LEN) {
+      s.over = true; s.won = true;
+      s.reason = "SHIFT COMPLETE. Two minutes on the shovel and the mill never missed a beat.";
+    }
+    return s;
+  }
+
+  function brRating(s) {
+    var pct = Math.round(100 * s.greenT / BR_LEN);
+    var title = pct >= 90 ? "Master Stoker" : pct >= 75 ? "Journeyman Fireman" : pct >= 55 ? "Apprentice" : "Ash Cat";
+    return { pct: pct, title: title };
+  }
+
+  /* ---------- game state ---------- */
+  var br = {
+    s: null, running: false, last: 0,
+    stoke: false, blow: false,
+    raf: 0, seed: (Date.now() % 100000) | 0,
+    best: null
+  };
+
+  function brBestGet() {
+    try {
+      var raw = window.localStorage.getItem("garage-boiler-best");
+      if (raw) br.best = JSON.parse(raw);
+    } catch (e) { br.best = null; }
+  }
+  function brBestSet(pct, title) {
+    br.best = { pct: pct, title: title };
+    try { window.localStorage.setItem("garage-boiler-best", JSON.stringify(br.best)); } catch (e) {}
+  }
+
+  /* ---------- rendering ---------- */
+  function brDrawGauge() {
+    var cv = br$("brGauge");
+    if (!cv) return;
+    var ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height;
+    var cx = W / 2, cy = H * 0.62, R = Math.min(W, H) * 0.42;
+    ctx.clearRect(0, 0, W, H);
+    // zone arcs
+    function arc(p0, p1, color, lw) {
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.arc(cx, cy, R, Math.PI + Math.PI * (p0 / 210), Math.PI + Math.PI * (p1 / 210));
+      ctx.stroke();
+    }
+    arc(0, 210, "#23302d", 14);
+    arc(BR_GREEN_LO, BR_GREEN_HI, "#7ee787", 14);
+    arc(BR_GREEN_HI, BR_VALVE, "#ff9f43", 14);
+    arc(BR_VALVE, 210, "#ff4668", 14);
+    // ticks
+    ctx.fillStyle = "#9fb3ae";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    var p, a, x1, y1, x2, y2;
+    for (p = 0; p <= 210; p += 15) {
+      a = Math.PI + Math.PI * (p / 210);
+      x1 = cx + Math.cos(a) * (R - 12); y1 = cy + Math.sin(a) * (R - 12);
+      x2 = cx + Math.cos(a) * (R - 20); y2 = cy + Math.sin(a) * (R - 20);
+      ctx.strokeStyle = "#9fb3ae"; ctx.lineWidth = p % 30 === 0 ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      if (p % 30 === 0) {
+        ctx.fillText(String(p), cx + Math.cos(a) * (R - 32), cy + Math.sin(a) * (R - 32) + 3);
+      }
+    }
+    // needle
+    var P = Math.max(0, Math.min(215, br.s ? br.s.P : 0));
+    a = Math.PI + Math.PI * (P / 210);
+    ctx.strokeStyle = "#ff4668"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * (R - 8), cy + Math.sin(a) * (R - 8));
+    ctx.stroke();
+    ctx.fillStyle = "#0a1416";
+    ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#9fb3ae"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.stroke();
+    // digital readout
+    ctx.fillStyle = "#e9f4e8";
+    ctx.font = "bold 22px monospace";
+    ctx.fillText(Math.round(P) + " psi", cx, cy + 42);
+    ctx.fillStyle = "#7c8d89";
+    ctx.font = "10px monospace";
+    ctx.fillText("STEAM PRESSURE", cx, cy + 58);
+  }
+
+  function brRender() {
+    if (!br.s) return;
+    var s = br.s;
+    brDrawGauge();
+    // water glass
+    var wl = br$("brWaterFill");
+    if (wl) {
+      wl.style.height = Math.max(0, Math.min(100, s.W)) + "%";
+      wl.className = "br-water-fill" + (s.W < 25 ? " low" : "");
+    }
+    var wt = br$("brWaterTxt");
+    if (wt) wt.textContent = Math.round(s.W) + "%";
+    // coal
+    var cf = br$("brCoalFill");
+    if (cf) cf.style.width = Math.max(0, Math.min(100, s.coal)) + "%";
+    var ct = br$("brCoalTxt");
+    if (ct) ct.textContent = Math.round(s.coal) + "%";
+    // fire
+    var fl = br$("brFlames");
+    if (fl) fl.style.opacity = (0.15 + 0.85 * s.fire).toFixed(2);
+    var ft = br$("brFireTxt");
+    if (ft) ft.textContent = s.fire < 0.15 ? "dying" : s.fire < 0.45 ? "steady" : s.fire < 0.75 ? "roaring" : "raging";
+    // demand
+    var d = brDemandAt(s);
+    var df = br$("brDrawFill");
+    if (df) df.style.width = Math.round(d * 100) + "%";
+    var dt2 = br$("brDrawTxt");
+    if (dt2) dt2.textContent = d > 0.5 ? "MILL DRAWING HARD" : d > 0.3 ? "mill drawing" : "light draw";
+    // vent indicator
+    var venting = s.P >= BR_VALVE || br.blow;
+    var v = br$("brVent");
+    if (v) v.style.display = venting ? "block" : "none";
+    // green lamp
+    var lamp = br$("brLamp");
+    if (lamp) lamp.className = "br-lamp" + (s.P >= BR_GREEN_LO && s.P <= BR_GREEN_HI ? " on" : "");
+    // timer
+    var tm = br$("brTimer");
+    if (tm) tm.textContent = brMMSS(s.t) + " / " + brMMSS(BR_LEN);
+    var pg = br$("brProgFill");
+    if (pg) pg.style.width = Math.min(100, 100 * s.t / BR_LEN) + "%";
+    // ticker
+    var ul = br$("brLog");
+    if (ul) {
+      var items = s.log.slice(-6).reverse();
+      var html = "";
+      for (var i = 0; i < items.length; i++) {
+        html += "<li><span class=\"br-ts\">[" + brMMSS(items[i].t) + "]</span> " + brEsc(items[i].msg) + "</li>";
+      }
+      ul.innerHTML = html || "<li class=\"dim\">Shift log is quiet. Too quiet.</li>";
+    }
+    // toggle button states
+    var dm = br$("brDamper");
+    if (dm) { dm.textContent = s.damper ? "DAMPER: OPEN" : "DAMPER: SHUT"; dm.classList.toggle("on", s.damper); }
+    var fp = br$("brFeed");
+    if (fp) { fp.textContent = s.feed ? "FEED PUMP: ON" : "FEED PUMP: OFF"; fp.classList.toggle("on", s.feed); }
+  }
+
+  /* ---------- game loop ---------- */
+  function brLoop(now) {
+    if (!br.running) return;
+    var dt = (now - br.last) / 1000;
+    br.last = now;
+    if (dt > 0.25) dt = 0.25;
+    var acc = dt;
+    while (acc > 0.0001 && !br.s.over) {
+      var h = Math.min(0.05, acc);
+      brStep(br.s, { stoke: br.stoke, blow: br.blow }, h);
+      acc -= h;
+    }
+    brRender();
+    if (br.s.over) {
+      br.running = false;
+      brShowEnd();
+      return;
+    }
+    br.raf = requestAnimationFrame(brLoop);
+  }
+
+  function brStartShift() {
+    br.s = brNewShift(br.seed);
+    br.seed = (br.seed + 1) | 0;
+    br.stoke = false; br.blow = false;
+    brLog(br.s, "Shift begins. Steam at " + Math.round(br.s.P) + " psi, glass at " + Math.round(br.s.W) + " percent. Mind the whistle.");
+    br$("brStart").style.display = "none";
+    br$("brEnd").style.display = "none";
+    br$("brGame").style.display = "block";
+    br.running = true;
+    br.last = performance.now();
+    br.raf = requestAnimationFrame(brLoop);
+    brRender();
+    brToast("Shift started. Keep her in the green.");
+  }
+
+  function brStop() {
+    br.running = false;
+    if (br.raf) cancelAnimationFrame(br.raf);
+    br.raf = 0;
+    br.stoke = false; br.blow = false;
+  }
+
+  function brShowEnd() {
+    var s = br.s;
+    var r = brRating(s);
+    br$("brGame").style.display = "none";
+    var end = br$("brEnd");
+    end.style.display = "block";
+    var cls = s.won ? "br-result win" : "br-result fail";
+    var bestLine = "";
+    if (s.won && (!br.best || r.pct > br.best.pct)) {
+      brBestSet(r.pct, r.title);
+      bestLine = "<p class=\"br-best\">New house record.</p>";
+    } else if (br.best) {
+      bestLine = "<p class=\"br-best\">House best: " + br.best.pct + "% (" + brEsc(br.best.title) + ").</p>";
+    }
+    end.innerHTML =
+      "<div class=\"" + cls + "\">" + brEsc(s.reason) + "</div>" +
+      "<div class=\"br-score\">SHIFT RATING <strong>" + r.pct + "%</strong> <span class=\"dim\">(" + brEsc(r.title) + ")</span></div>" +
+      "<p class=\"br-sub\">Time in the green (110 to 160 psi): " + Math.round(s.greenT) + "s of " + BR_LEN + "s." +
+      (s.lifted ? " The safety valve lifted at least once." : " The safety valve never had to lift.") + "</p>" +
+      bestLine +
+      "<div class=\"br-actions\">" +
+      "<button id=\"brReport\" class=\"br-big\">Download shift report</button>" +
+      "<button id=\"brAgain\" class=\"br-big accent\">Work another shift</button>" +
+      "<button id=\"brClose2\" class=\"br-big\">Back to the garage</button>" +
+      "</div>";
+    br$("brReport").addEventListener("click", brReport);
+    br$("brAgain").addEventListener("click", brStartShift);
+    br$("brClose2").addEventListener("click", brClose);
+  }
+
+  function brReport() {
+    var s = br.s;
+    if (!s) return;
+    var r = brRating(s);
+    var lines = s.log.map(function (e) { return "[" + brMMSS(e.t) + "] " + e.msg; });
+    var txt =
+      "BOILER ROOM SHIFT REPORT\n" +
+      "Garage Inventions: The Boiler Room\n" +
+      "================================\n" +
+      "Date   : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Seed   : " + s.seed + "\n" +
+      "Result : " + (s.won ? "SHIFT COMPLETE" : "FAILED") + "\n" +
+      "Detail : " + s.reason + "\n" +
+      "Rating : " + r.pct + "% (" + r.title + ")\n" +
+      "Green  : " + Math.round(s.greenT) + "s of " + BR_LEN + "s in the 110-160 psi band\n" +
+      "Valve  : " + (s.lifted ? "lifted" : "never lifted") + "\n" +
+      "Coal left: " + Math.round(s.coal) + "%\n" +
+      "\nShift log:\n" + lines.join("\n") + "\n" +
+      "\nSigned by the pressure gauge. The needle does not lie.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "boiler-room-shift-report.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    brToast("Shift report downloaded");
+  }
+
+  function brClose() {
+    brStop();
+    br$("brOverlay").classList.remove("open");
+  }
+
+  /* ---------- build ---------- */
+  function brBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || br$("brBtn")) return;
+    brBestGet();
+
+    var css = [
+      ".br-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.93);display:none;align-items:center;justify-content:center;padding:14px;}",
+      ".br-overlay.open{display:flex;}",
+      ".br-panel{width:min(860px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--orange);padding:16px;}",
+      ".br-panel h3{font-family:'Chakra Petch',sans-serif;margin:0 0 6px;font-size:24px;letter-spacing:.02em;text-transform:uppercase;color:var(--orange);}",
+      ".br-sub{font-size:12px;line-height:1.7;color:#9fb3ae;margin:0 0 12px;}",
+      ".br-rules{border:1px dashed var(--orange);padding:12px 14px;margin-bottom:12px;background:rgba(255,107,44,.05);}",
+      ".br-rules p{margin:0 0 8px;font-size:12px;line-height:1.7;color:var(--ink);}",
+      ".br-rules p:last-child{margin-bottom:0;}",
+      ".br-rules strong{color:var(--orange);}",
+      ".br-top{display:flex;gap:10px;align-items:stretch;margin-bottom:10px;flex-wrap:wrap;}",
+      ".br-timer{border:1px solid var(--line);background:var(--panel-2);padding:8px 12px;font-family:monospace;font-size:15px;color:var(--ink);display:flex;align-items:center;gap:10px;}",
+      ".br-lamp{width:18px;height:18px;border-radius:50%;background:#3a2a2a;border:1px solid var(--line);flex:none;}",
+      ".br-lamp.on{background:var(--acid);box-shadow:0 0 10px var(--acid);}",
+      ".br-prog{flex:1;min-width:140px;border:1px solid var(--line);background:#060b0c;position:relative;min-height:40px;}",
+      ".br-prog-fill{position:absolute;left:0;top:0;bottom:0;background:rgba(126,231,135,.25);width:0;}",
+      ".br-prog span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;color:#9fb3ae;letter-spacing:.1em;}",
+      ".br-dials{display:grid;grid-template-columns:1fr 120px 1fr;gap:10px;margin-bottom:10px;}",
+      ".br-dialbox{border:1px solid var(--line);background:#060b0c;padding:6px;display:flex;flex-direction:column;align-items:center;}",
+      ".br-dialbox canvas{width:100%;height:auto;}",
+      ".br-glassbox{border:1px solid var(--line);background:#060b0c;padding:8px;display:flex;flex-direction:column;align-items:center;gap:6px;}",
+      ".br-glass{width:44px;height:170px;border:2px solid #9fb3ae;background:#0a1416;position:relative;overflow:hidden;}",
+      ".br-water-fill{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(to top,#1e6f8e,#4fc3e8);transition:height .2s;}",
+      ".br-water-fill.low{background:linear-gradient(to top,#8e1e2e,#e84f6a);}",
+      ".br-glass .mark{position:absolute;left:0;right:0;border-top:1px dashed #ff9f43;}",
+      ".br-cap{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#7c8d89;text-align:center;font-weight:600;}",
+      ".br-sidecol{display:flex;flex-direction:column;gap:10px;}",
+      ".br-meter{border:1px solid var(--line);background:var(--panel-2);padding:8px 10px;}",
+      ".br-meter h6{margin:0 0 6px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".br-bar{height:14px;background:#060b0c;border:1px solid var(--line);position:relative;overflow:hidden;}",
+      ".br-bar i{position:absolute;left:0;top:0;bottom:0;background:var(--cyan);display:block;}",
+      ".br-bar.coal i{background:var(--orange);}",
+      ".br-meter p{margin:6px 0 0;font-family:monospace;font-size:11px;color:var(--ink);}",
+      ".br-firebox{border:1px solid var(--line);background:#050808;height:86px;position:relative;overflow:hidden;margin-bottom:10px;}",
+      ".br-flames{position:absolute;inset:0;background:radial-gradient(ellipse 60% 90% at 30% 100%,rgba(255,180,60,.95),rgba(255,107,44,.7) 45%,rgba(120,30,10,0) 75%),radial-gradient(ellipse 50% 80% at 65% 100%,rgba(255,220,120,.9),rgba(255,107,44,.55) 50%,rgba(120,30,10,0) 75%),radial-gradient(ellipse 40% 70% at 85% 100%,rgba(255,150,50,.8),rgba(255,107,44,.4) 55%,rgba(120,30,10,0) 75%);animation:brFlick .5s infinite alternate ease-in-out;}",
+      "@keyframes brFlick{from{transform:scaleY(1);}to{transform:scaleY(1.12) translateY(-2px);}}",
+      ".br-firebox .br-cap{position:absolute;top:6px;left:10px;z-index:2;}",
+      ".br-firetxt{position:absolute;top:6px;right:10px;z-index:2;font-family:monospace;font-size:11px;color:var(--orange);}",
+      ".br-vent{display:none;position:absolute;inset:0;z-index:3;background:repeating-linear-gradient(to top,rgba(200,220,220,0) 0 14px,rgba(200,220,220,.28) 14px 22px);animation:brRise .7s infinite linear;pointer-events:none;}",
+      "@keyframes brRise{from{background-position:0 44px;}to{background-position:0 0;}}",
+      ".br-ticker{border:1px solid var(--line);background:var(--panel-2);padding:8px 12px;margin-bottom:10px;min-height:96px;}",
+      ".br-ticker ul{list-style:none;margin:0;padding:0;font-family:monospace;font-size:11px;line-height:1.8;color:var(--ink);}",
+      ".br-ticker .br-ts{color:var(--cyan);}",
+      ".br-ticker .dim{color:#72827f;}",
+      ".br-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".br-controls button{min-height:64px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);touch-action:none;user-select:none;-webkit-user-select:none;}",
+      ".br-controls button:active{background:#1a2a28;}",
+      ".br-controls button.on{border-color:var(--acid);color:var(--acid);}",
+      ".br-controls button.held{background:#2a1a10;border-color:var(--orange);color:var(--orange);}",
+      ".br-controls button.warn{border-color:#ff4668;color:#ff8ba0;}",
+      ".br-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}",
+      ".br-big{min-height:52px;padding:10px 8px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--line);color:var(--ink);}",
+      ".br-big.accent{border-color:var(--orange);color:var(--orange);}",
+      ".br-result{padding:12px 14px;font-size:13px;font-family:monospace;border:1px solid var(--line);line-height:1.7;margin-bottom:10px;color:var(--ink);}",
+      ".br-result.win{border-color:var(--acid);color:var(--acid);}",
+      ".br-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+      ".br-score{font-family:monospace;font-size:14px;color:var(--ink);margin-bottom:8px;}",
+      ".br-score strong{color:var(--orange);font-size:20px;}",
+      ".br-score .dim{color:#72827f;font-size:12px;}",
+      ".br-best{font-family:monospace;font-size:12px;color:var(--cyan);margin:0 0 10px;}",
+      ".br-bestline{font-family:monospace;font-size:11px;color:#7c8d89;margin:0 0 12px;}",
+      ".br-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+      ".br-foot .br-big{flex:1;min-width:140px;}",
+      "@media (max-width:640px){.br-dials{grid-template-columns:1fr 96px;}.br-sidecol{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;}.br-controls{grid-template-columns:1fr 1fr;}.br-actions{grid-template-columns:1fr;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = brEl("button", "secondary", "Fire the Boiler Room");
+    b.id = "brBtn";
+    box.appendChild(b);
+
+    var ov = brEl("div", "br-overlay");
+    ov.id = "brOverlay";
+    ov.innerHTML =
+      "<div class=\"br-panel\" role=\"dialog\" aria-label=\"The Boiler Room steam boiler game\">" +
+      "<h3>The Boiler Room</h3>" +
+      "<p class=\"br-sub\">Lancashire boiler, one fireman, two minutes. The mill is counting on you.</p>" +
+      "<div id=\"brStart\">" +
+      "<div class=\"br-rules\">" +
+      "<p><strong>The job:</strong> hold steam between <strong>110 and 160 psi</strong> for a full two-minute shift. The green lamp tells you when she is in the band.</p>" +
+      "<p><strong>Deaths, all real:</strong> past <strong>205 psi</strong> she explodes. Water off the glass and the crown sheet burns. Under <strong>45 psi</strong> for 8 seconds and the engine stalls. At 192 the safety valve lifts and screams, but it will not save you twice.</p>" +
+      "<p><strong>The tools:</strong> hold <strong>SHOVEL</strong> to feed the fire (burns coal). <strong>DAMPER</strong> open burns hotter and faster. <strong>FEED PUMP</strong> adds water but cools the steam. Hold <strong>BLOWDOWN</strong> to dump steam and water in an emergency. Watch the ticker: the whistle warns you before the mill draws.</p>" +
+      "</div>" +
+      "<p class=\"br-bestline\" id=\"brBestLine\"></p>" +
+      "<div class=\"br-foot\"><button id=\"brBegin\" class=\"br-big accent\">Begin shift</button>" +
+      "<button id=\"brClose0\" class=\"br-big\">Not today</button></div>" +
+      "</div>" +
+      "<div id=\"brGame\" style=\"display:none;\">" +
+      "<div class=\"br-top\">" +
+      "<div class=\"br-timer\"><span class=\"br-lamp\" id=\"brLamp\"></span><span id=\"brTimer\">00:00 / 02:00</span></div>" +
+      "<div class=\"br-prog\"><div class=\"br-prog-fill\" id=\"brProgFill\"></div><span>SHIFT PROGRESS</span></div>" +
+      "</div>" +
+      "<div class=\"br-dials\">" +
+      "<div class=\"br-dialbox\"><canvas id=\"brGauge\" width=\"300\" height=\"230\"></canvas></div>" +
+      "<div class=\"br-glassbox\"><div class=\"br-cap\">Water glass</div><div class=\"br-glass\"><div class=\"br-water-fill\" id=\"brWaterFill\" style=\"height:70%\"></div><div class=\"mark\" style=\"bottom:25%\"></div><div class=\"mark\" style=\"bottom:85%\"></div></div><div class=\"br-cap\" id=\"brWaterTxt\">70%</div></div>" +
+      "<div class=\"br-sidecol\">" +
+      "<div class=\"br-meter\"><h6>Coal bunker</h6><div class=\"br-bar coal\"><i id=\"brCoalFill\" style=\"width:100%\"></i></div><p id=\"brCoalTxt\">100%</p></div>" +
+      "<div class=\"br-meter\"><h6>Mill draw</h6><div class=\"br-bar\"><i id=\"brDrawFill\" style=\"width:22%\"></i></div><p id=\"brDrawTxt\">light draw</p></div>" +
+      "</div>" +
+      "</div>" +
+      "<div class=\"br-firebox\"><span class=\"br-cap\">Firebox</span><span class=\"br-firetxt\" id=\"brFireTxt\">steady</span><div class=\"br-flames\" id=\"brFlames\"></div><div class=\"br-vent\" id=\"brVent\"></div></div>" +
+      "<div class=\"br-ticker\"><ul id=\"brLog\"></ul></div>" +
+      "<div class=\"br-controls\">" +
+      "<button id=\"brStoke\">Shovel coal (hold)</button>" +
+      "<button id=\"brDamper\">Damper: shut</button>" +
+      "<button id=\"brFeed\">Feed pump: off</button>" +
+      "<button id=\"brBlow\" class=\"warn\">Blowdown (hold)</button>" +
+      "</div>" +
+      "<div class=\"br-foot\"><button id=\"brAbort\" class=\"br-big\">Abandon shift</button><button id=\"brClose1\" class=\"br-big\">Close</button></div>" +
+      "</div>" +
+      "<div id=\"brEnd\" style=\"display:none;\"></div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    function hold(btn, set) {
+      var on = function (e) { e.preventDefault(); set(true); btn.classList.add("held"); };
+      var off = function () { set(false); btn.classList.remove("held"); };
+      btn.addEventListener("pointerdown", on);
+      btn.addEventListener("pointerup", off);
+      btn.addEventListener("pointerleave", off);
+      btn.addEventListener("pointercancel", off);
+      btn.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    }
+
+    br$("brBegin").addEventListener("click", brStartShift);
+    br$("brClose0").addEventListener("click", brClose);
+    br$("brClose1").addEventListener("click", brClose);
+    br$("brAbort").addEventListener("click", function () {
+      brStop();
+      br$("brGame").style.display = "none";
+      br$("brEnd").style.display = "none";
+      br$("brStart").style.display = "block";
+      brToast("Shift abandoned. The mill understands.");
+    });
+    hold(br$("brStoke"), function (v) { br.stoke = v; });
+    hold(br$("brBlow"), function (v) { br.blow = v; });
+    br$("brDamper").addEventListener("click", function () { if (br.s && !br.s.over) br.s.damper = !br.s.damper; });
+    br$("brFeed").addEventListener("click", function () { if (br.s && !br.s.over) br.s.feed = !br.s.feed; });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && ov.classList.contains("open")) brClose();
+      if (e.code === "Space" && ov.classList.contains("open") && br.running && br.s && !br.s.over) {
+        e.preventDefault();
+        if (!br.stoke) { br.stoke = true; br$("brStoke").classList.add("held"); }
+      }
+    });
+    document.addEventListener("keyup", function (e) {
+      if (e.code === "Space" && br.stoke) { br.stoke = false; var b2 = br$("brStoke"); if (b2) b2.classList.remove("held"); }
+    });
+    ov.addEventListener("click", function (e) { if (e.target === ov) brClose(); });
+    b.addEventListener("click", function () {
+      ov.classList.add("open");
+      var bl = br$("brBestLine");
+      if (bl) bl.textContent = br.best ? ("House best: " + br.best.pct + "% (" + br.best.title + ").") : "No fireman has completed a shift yet. Be the first.";
+      if (br.s && !br.s.over && !br.running) {
+        br.running = true;
+        br.last = performance.now();
+        br.raf = requestAnimationFrame(brLoop);
+      }
+    });
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", brBuild);
+    } else {
+      brBuild();
+    }
+  }
+
+  /* node test hook: harmless in the browser */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      brNewShift: brNewShift,
+      brStep: brStep,
+      brDemandAt: brDemandAt,
+      brRating: brRating,
+      BR_LEN: BR_LEN
     };
   }
 
