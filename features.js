@@ -10448,3 +10448,1179 @@ function gyScoreLift(st) {
   }
 
 })();
+/* ============================================================
+   THE PIPELINE HAZARD LAB
+   A classic five-stage RV32I pipeline (IF/ID/EX/MEM/WB) with real
+   forwarding, real load-use and control stalls, and a swappable
+   branch predictor. Edit the program, flip forwarding, swap the
+   predictor, and watch cycles, stalls, and forwarding arcs move.
+   Three trials with cycle budgets, plus a downloadable profile
+   card. Companion bench to the Silicon Anvil, built for the
+   portfolio's RISC-V focus.
+   Pure sim + assembler between PH-SIM-BEGIN/END are shared
+   verbatim with the node test harness.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  /* ---------- local helpers (never touch outer scope) ---------- */
+  var ph$ = function (id) { return document.getElementById(id); };
+  function phEl(tag, cls, html) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (html != null) d.innerHTML = html;
+    return d;
+  }
+  function phToast(msg) {
+    if (typeof window.showToast === "function") { window.showToast(msg); return; }
+    var t = ph$("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(function () { t.classList.remove("show"); }, 1800);
+  }
+  function phEsc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function phHex(n) {
+    return "0x" + ("00000000" + ((n | 0) >>> 0).toString(16)).slice(-8);
+  }
+
+  /* ---------- injected styles ---------- */
+  var PH_CSS = [
+    ".ph-overlay{position:fixed;inset:0;background:rgba(4,7,7,.93);z-index:95;display:none;overflow-y:auto;padding:18px 12px;}",
+    ".ph-overlay.open{display:block;}",
+    ".ph-panel{max-width:1140px;margin:0 auto;background:var(--panel);border:1px solid var(--line);padding:22px;}",
+    ".ph-panel h3{font-family:'Chakra Petch',sans-serif;font-size:26px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.02em;color:var(--acid);}",
+    ".ph-sub{font-size:12px;line-height:1.65;color:#9fb3ae;margin:0 0 14px;max-width:76ch;}",
+    ".ph-sub a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan);}",
+    ".ph-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}",
+    ".ph-tab{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:10px 14px;cursor:pointer;min-height:44px;}",
+    ".ph-tab.on{border-color:var(--acid);color:var(--acid);}",
+    ".ph-brief{border:1px dashed var(--orange);background:rgba(255,107,44,.05);padding:12px 14px;margin-bottom:12px;font-size:12px;line-height:1.6;color:var(--ink);display:none;}",
+    ".ph-brief.show{display:block;}",
+    ".ph-brief b{color:var(--orange);}",
+    ".ph-brief .par{color:var(--acid);}",
+    ".ph-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;}",
+    ".ph-toolbar .secondary{min-height:44px;}",
+    ".ph-toolbar select{background:var(--black,#0a0f0e);border:1px solid var(--line);color:var(--ink);font:inherit;font-size:11px;padding:10px 8px;min-height:44px;}",
+    ".ph-toolbar .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#7c8d89;}",
+    ".ph-main{display:grid;grid-template-columns:minmax(300px,5fr) 7fr;gap:14px;}",
+    ".ph-edhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}",
+    ".ph-edhead h4,.ph-righth h4{margin:0;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".ph-edhead .secondary{min-height:36px;font-size:11px;padding:6px 10px;}",
+    ".ph-edwrap{display:grid;grid-template-columns:40px 1fr;border:1px solid var(--line);background:#0a0f0e;}",
+    ".ph-gutter{background:var(--panel-2);color:#5f726e;font-family:monospace;font-size:12px;line-height:1.7;padding:10px 0;text-align:center;user-select:none;overflow:hidden;}",
+    ".ph-gutter div{height:20.4px;}",
+    ".ph-gutter div.hot{color:#ffb199;background:rgba(255,107,44,.18);cursor:pointer;}",
+    ".ph-ed{width:100%;min-height:340px;background:transparent;border:0;color:var(--ink);font-family:monospace;font-size:12px;line-height:1.7;padding:10px 12px;resize:vertical;white-space:pre;}",
+    ".ph-ed:focus{outline:1px solid var(--cyan);}",
+    ".ph-errors{font-size:11px;color:#ff9d7a;margin:6px 0 0;line-height:1.6;display:none;}",
+    ".ph-errors.show{display:block;}",
+    ".ph-blame{margin-top:10px;font-size:11px;line-height:1.7;color:#9fb3ae;}",
+    ".ph-blame .brow{cursor:pointer;padding:4px 6px;border-left:2px solid var(--orange);margin-bottom:4px;background:rgba(255,107,44,.05);}",
+    ".ph-blame .brow:hover{background:rgba(255,107,44,.12);}",
+    ".ph-blame .brow b{color:var(--orange);}",
+    ".ph-strip{display:flex;align-items:stretch;gap:4px;margin-bottom:10px;overflow-x:auto;padding-bottom:4px;}",
+    ".ph-stage{flex:1 1 0;min-width:118px;border:1px solid var(--line);background:var(--panel-2);padding:8px;min-height:96px;}",
+    ".ph-stage h5{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;}",
+    ".ph-stage.s0 h5{color:var(--cyan);}.ph-stage.s1 h5{color:var(--acid);}.ph-stage.s2 h5{color:var(--orange);}.ph-stage.s3 h5{color:#c9a2ff;}.ph-stage.s4 h5{color:#7dffb0;}",
+    ".ph-stage .inst{font-family:monospace;font-size:11px;line-height:1.5;color:var(--ink);overflow-wrap:anywhere;}",
+    ".ph-stage .empty{color:#4d5f5b;font-size:11px;}",
+    ".ph-stage.bubble{border-color:var(--orange);animation:phPulse 0.9s ease-in-out infinite;}",
+    ".ph-stage.bubble .inst{color:var(--orange);}",
+    ".ph-stage.flushed{border-color:#ff5d5d;}",
+    "@keyframes phPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,107,44,0);}50%{box-shadow:0 0 12px 0 rgba(255,107,44,.45);}}",
+    ".ph-fwdtag{display:inline-block;font-size:9px;letter-spacing:.06em;color:#0a0f0e;background:var(--acid);padding:1px 5px;margin:2px 2px 0 0;font-family:monospace;}",
+    ".ph-arrow{align-self:center;color:#4d5f5b;font-size:16px;flex:none;}",
+    ".ph-tracewrap{border:1px solid var(--line);overflow:auto;max-height:300px;background:#0a0f0e;}",
+    ".ph-trace{border-collapse:collapse;font-family:monospace;font-size:10px;white-space:nowrap;}",
+    ".ph-trace th,.ph-trace td{border:1px solid #1c2725;padding:3px 7px;text-align:center;}",
+    ".ph-trace th{position:sticky;top:0;background:var(--panel-2);color:#7c8d89;z-index:2;}",
+    ".ph-trace td.pc{position:sticky;left:0;background:var(--panel-2);color:var(--ink);text-align:left;z-index:1;max-width:220px;overflow:hidden;text-overflow:ellipsis;}",
+    ".ph-trace td.c-IF{color:var(--cyan);}.ph-trace td.c-ID{color:var(--acid);}.ph-trace td.c-EX{color:var(--orange);font-weight:bold;}.ph-trace td.c-MEM{color:#c9a2ff;}.ph-trace td.c-WB{color:#7dffb0;}",
+    ".ph-trace tr.killed td{opacity:.35;text-decoration:line-through;}",
+    ".ph-trace td.cur{background:rgba(199,255,56,.10);}",
+    ".ph-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:8px;margin:14px 0;}",
+    ".ph-stat{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".ph-stat h4{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".ph-stat p{margin:0;font-family:monospace;font-size:17px;color:var(--ink);}",
+    ".ph-stat p.warn{color:var(--orange);}",
+    ".ph-stat p.good{color:var(--acid);}",
+    ".ph-regmem{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:6px;}",
+    ".ph-regmem details{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".ph-regmem summary{cursor:pointer;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);min-height:44px;display:flex;align-items:center;}",
+    ".ph-regtable{font-family:monospace;font-size:10px;line-height:1.7;color:var(--ink);columns:2;}",
+    ".ph-regtable .rz{color:#4d5f5b;}",
+    ".ph-regtable .rhot{color:var(--acid);}",
+    ".ph-banner{border:1px solid var(--acid);background:rgba(199,255,56,.06);padding:14px 16px;margin:14px 0;display:none;}",
+    ".ph-banner.show{display:block;}",
+    ".ph-banner h4{margin:0 0 6px;font-family:'Chakra Petch',sans-serif;font-size:18px;text-transform:uppercase;color:var(--acid);}",
+    ".ph-banner p{margin:0;font-size:12px;line-height:1.6;color:var(--ink);}",
+    ".ph-banner.fail{border-color:#ff5d5d;background:rgba(255,93,93,.06);}",
+    ".ph-banner.fail h4{color:#ff5d5d;}",
+    ".ph-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}",
+    ".ph-foot .secondary,.ph-foot .primary{flex:1;min-height:44px;}",
+    ".ph-foot .primary{border-color:var(--acid);color:var(--acid);}",
+    "@media (max-width:900px){.ph-main{grid-template-columns:1fr;}.ph-regmem{grid-template-columns:1fr;}.ph-panel h3{font-size:20px;}}"
+  ].join("\n");
+
+/* PH-SIM-BEGIN */
+var PH_MEM_WORDS = 256;
+
+var PH_ABI = { zero: 0, ra: 1, sp: 2, gp: 3, tp: 4, t0: 5, t1: 6, t2: 7, s0: 8, fp: 8, s1: 9, a0: 10, a1: 11, a2: 12, a3: 13, a4: 14, a5: 15, a6: 16, a7: 17, s2: 18, s3: 19, s4: 20, s5: 21, s6: 22, s7: 23, s8: 24, s9: 25, s10: 26, s11: 27, t3: 28, t4: 29, t5: 30, t6: 31 };
+var PH_ABI_BY_NUM = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"];
+
+function phRegName(n) { return PH_ABI_BY_NUM[n] || ("x" + n); }
+
+function phRegNum(tok, line, errors) {
+  tok = String(tok).trim();
+  var n, m = /^x(\d+)$/.exec(tok);
+  if (m) n = parseInt(m[1], 10);
+  else if (Object.prototype.hasOwnProperty.call(PH_ABI, tok)) n = PH_ABI[tok];
+  if (n === undefined || n < 0 || n > 31) {
+    errors.push({ line: line, msg: "bad register '" + tok + "'" });
+    return 0;
+  }
+  return n;
+}
+
+function phImmNum(tok, line, errors, lo, hi, what) {
+  tok = String(tok).trim();
+  var v;
+  if (/^0x[0-9a-fA-F]+$/.test(tok)) v = parseInt(tok, 16);
+  else if (/^-?\d+$/.test(tok)) v = parseInt(tok, 10);
+  else { errors.push({ line: line, msg: "bad immediate '" + tok + "'" }); return 0; }
+  if (v < lo || v > hi) errors.push({ line: line, msg: (what || "immediate") + " " + v + " out of range [" + lo + ", " + hi + "]" });
+  return v | 0;
+}
+
+/* op -> format. R: rd,rs1,rs2 | I: rd,rs1,imm | Is: rd,rs1,shamt |
+   L: rd,off(rs1) | S: rs2,off(rs1) | B: rs1,rs2,target | J: rd,target | N: none */
+var PH_FMT = {
+  add: "R", sub: "R", and: "R", or: "R", xor: "R", sll: "R", srl: "R",
+  addi: "I", andi: "I", ori: "I", xori: "I", slli: "Is", srli: "Is",
+  lw: "L", sw: "S",
+  beq: "B", bne: "B", blt: "B", bge: "B",
+  jal: "J", nop: "N"
+};
+
+function phAssemble(src) {
+  var errors = [], instrs = [], labels = {};
+  var rawLines = String(src).split("\n");
+  var cleaned = [];
+  var i, ln;
+  for (i = 0; i < rawLines.length; i++) {
+    var line = rawLines[i];
+    var c = line.indexOf("#");
+    var c2 = line.indexOf("//");
+    if (c2 >= 0 && (c < 0 || c2 < c)) c = c2;
+    var c3 = line.indexOf(";");
+    if (c3 >= 0 && (c < 0 || c3 < c)) c = c3;
+    if (c >= 0) line = line.slice(0, c);
+    cleaned.push({ line: i + 1, text: line });
+  }
+  /* pass 1: labels */
+  var pc = 0;
+  var items = [];
+  for (i = 0; i < cleaned.length; i++) {
+    var t = cleaned[i].text, lineNo = cleaned[i].line;
+    var lm = /^\s*([A-Za-z_][\w]*)\s*:\s*(.*)$/.exec(t);
+    if (lm) {
+      if (Object.prototype.hasOwnProperty.call(labels, lm[1])) {
+        errors.push({ line: lineNo, msg: "duplicate label '" + lm[1] + "'" });
+      } else labels[lm[1]] = pc;
+      t = lm[2];
+    }
+    t = t.trim();
+    if (!t) continue;
+    items.push({ line: lineNo, pc: pc, text: t });
+    pc += 4;
+  }
+  /* pass 2: encode */
+  for (i = 0; i < items.length; i++) {
+    (function (it) {
+      var parts = it.text.split(/\s+/);
+      var op = parts[0].toLowerCase();
+      var rest = it.text.slice(parts[0].length).trim();
+      /* pseudos */
+      if (op === "li" || op === "mv" || op === "j") {
+        var a = rest.split(",").map(function (s) { return s.trim(); });
+        if (op === "li" && a.length === 2) { op = "addi"; rest = a[0] + ", x0, " + a[1]; }
+        else if (op === "mv" && a.length === 2) { op = "addi"; rest = a[0] + ", " + a[1] + ", 0"; }
+        else if (op === "j" && a.length === 1) { op = "jal"; rest = "x0, " + a[0]; }
+        else { errors.push({ line: it.line, msg: "bad pseudo-instruction '" + it.text + "'" }); return; }
+        parts = [op];
+      }
+      var fmt = PH_FMT[op];
+      if (!fmt) { errors.push({ line: it.line, msg: "unknown op '" + parts[0] + "'" }); return; }
+      var ins = { pc: it.pc, line: it.line, op: op, rd: 0, rs1: -1, rs2: -1, imm: 0, target: 0, text: "" };
+      function ops(n) {
+        var p = rest.split(",");
+        if (p.length !== n) { errors.push({ line: it.line, msg: op + " wants " + n + " operands" }); return null; }
+        return p.map(function (s) { return s.trim(); });
+      }
+      var o;
+      if (fmt === "R") {
+        o = ops(3); if (!o) return;
+        ins.rd = phRegNum(o[0], it.line, errors);
+        ins.rs1 = phRegNum(o[1], it.line, errors);
+        ins.rs2 = phRegNum(o[2], it.line, errors);
+      } else if (fmt === "I" || fmt === "Is") {
+        o = ops(3); if (!o) return;
+        ins.rd = phRegNum(o[0], it.line, errors);
+        ins.rs1 = phRegNum(o[1], it.line, errors);
+        ins.imm = fmt === "Is" ? phImmNum(o[2], it.line, errors, 0, 31, "shift amount")
+                               : phImmNum(o[2], it.line, errors, -2048, 2047, "immediate");
+      } else if (fmt === "L" || fmt === "S") {
+        o = ops(2); if (!o) return;
+        var mm = /^(-?0x[0-9a-fA-F]+|-?\d+)\(\s*([A-Za-z0-9_]+)\s*\)$/.exec(o[1]);
+        if (!mm) { errors.push({ line: it.line, msg: "bad memory operand '" + o[1] + "', use off(reg)" }); return; }
+        ins.imm = phImmNum(mm[1], it.line, errors, -2048, 2047, "offset");
+        ins.rs1 = phRegNum(mm[2], it.line, errors);
+        if (fmt === "L") ins.rd = phRegNum(o[0], it.line, errors);
+        else ins.rs2 = phRegNum(o[0], it.line, errors);
+      } else if (fmt === "B") {
+        o = ops(3); if (!o) return;
+        ins.rs1 = phRegNum(o[0], it.line, errors);
+        ins.rs2 = phRegNum(o[1], it.line, errors);
+        ins.target = phTarget(o[2], it, labels, errors);
+      } else if (fmt === "J") {
+        o = ops(2); if (!o) return;
+        ins.rd = phRegNum(o[0], it.line, errors);
+        ins.target = phTarget(o[1], it, labels, errors);
+      }
+      if (fmt === "B" || fmt === "J") {
+        if (ins.target % 4 !== 0 || ins.target < 0) {
+          errors.push({ line: it.line, msg: "branch target must be a non-negative multiple of 4" });
+        }
+      }
+      ins.isLoad = (op === "lw");
+      ins.isStore = (op === "sw");
+      ins.isBranch = (fmt === "B");
+      ins.isJump = (op === "jal");
+      ins.writesRd = (fmt === "R" || fmt === "I" || fmt === "Is" || fmt === "L" || op === "jal");
+      ins.usesRs2 = (fmt === "R" || fmt === "S" || fmt === "B");
+      ins.rs = [];
+      if (ins.rs1 >= 0) ins.rs.push(ins.rs1);
+      if (ins.usesRs2 && ins.rs2 >= 0) ins.rs.push(ins.rs2);
+      ins.text = phNorm(ins);
+      instrs.push(ins);
+    })(items[i]);
+  }
+  return { ok: errors.length === 0 && instrs.length > 0, instrs: instrs, errors: errors };
+}
+
+function phTarget(tok, it, labels, errors) {
+  tok = String(tok).trim();
+  if (Object.prototype.hasOwnProperty.call(labels, tok)) return labels[tok];
+  if (/^-?0x[0-9a-fA-F]+$/.test(tok) || /^-?\d+$/.test(tok)) {
+    var v = /^0x/i.test(tok) ? parseInt(tok, 16) : parseInt(tok, 10);
+    return (it.pc + v) | 0; /* pc-relative byte offset, like the machine encoding */
+  }
+  errors.push({ line: it.line, msg: "unknown label '" + tok + "'" });
+  return it.pc + 4;
+}
+
+function phNorm(ins) {
+  var r = phRegName;
+  switch (ins.op) {
+    case "lw": return "lw " + r(ins.rd) + ", " + ins.imm + "(" + r(ins.rs1) + ")";
+    case "sw": return "sw " + r(ins.rs2) + ", " + ins.imm + "(" + r(ins.rs1) + ")";
+    case "beq": case "bne": case "blt": case "bge":
+      return ins.op + " " + r(ins.rs1) + ", " + r(ins.rs2) + ", ->" + ins.target;
+    case "jal": return "jal " + r(ins.rd) + ", ->" + ins.target;
+    case "nop": return "nop";
+    default:
+      if (PH_FMT[ins.op] === "R") return ins.op + " " + r(ins.rd) + ", " + r(ins.rs1) + ", " + r(ins.rs2);
+      return ins.op + " " + r(ins.rd) + ", " + r(ins.rs1) + ", " + ins.imm;
+  }
+}
+
+/* ---------- pipeline simulator (pure, no DOM) ---------- */
+function phNewSim(instrs, opts) {
+  opts = opts || {};
+  var s = {
+    instrs: instrs,
+    fwd: opts.fwd !== false,
+    predictor: opts.predictor || "2bit",
+    regs: [], mem: [],
+    pipe: [null, null, null, null, null],
+    pcNext: 0, nextId: 1,
+    cycle: 0, retired: 0,
+    dataStalls: 0, controlStalls: 0, forwards: 0,
+    preds: 0, predHit: 0,
+    bht: {},
+    trace: [],
+    blame: {},
+    bubbleEX: false,
+    lastEvents: [],
+    done: false, trap: ""
+  };
+  var i;
+  for (i = 0; i < 32; i++) s.regs.push(0);
+  for (i = 0; i < PH_MEM_WORDS; i++) s.mem.push(0);
+  if (opts.memInit) {
+    for (var a in opts.memInit) {
+      if (Object.prototype.hasOwnProperty.call(opts.memInit, a)) {
+        var w = parseInt(a, 10);
+        if (w >= 0 && w < PH_MEM_WORDS) s.mem[w] = opts.memInit[a] | 0;
+      }
+    }
+  }
+  return s;
+}
+
+function phBlame(s, pc, kind) {
+  var b = s.blame[pc];
+  if (!b) { b = { data: 0, control: 0 }; s.blame[pc] = b; }
+  b[kind]++;
+}
+
+function phPredict(s, pc) {
+  if (s.predictor === "t") return true;
+  if (s.predictor === "2bit") return (s.bht[pc] === undefined ? 1 : s.bht[pc]) >= 2;
+  return false; /* "nt" */
+}
+
+function phFetch(s) {
+  var ii = s.pcNext / 4;
+  var ins = s.instrs[ii];
+  var slot = {
+    id: s.nextId++, ii: ii, pc: ins.pc, line: ins.line, text: ins.text,
+    op: ins.op, rd: ins.rd, rs1: ins.rs1, rs2: ins.rs2, imm: ins.imm,
+    target: ins.target, rs: ins.rs.slice(),
+    isLoad: ins.isLoad, isStore: ins.isStore, isBranch: ins.isBranch,
+    isJump: ins.isJump, writesRd: ins.writesRd, usesRs2: ins.usesRs2,
+    predTaken: false, predTarget: ins.pc + 4,
+    res: 0, sdata: 0, killed: false, killCycle: -1
+  };
+  if (ins.isBranch) {
+    slot.predTaken = phPredict(s, ins.pc);
+    slot.predTarget = slot.predTaken ? ins.target : ins.pc + 4;
+  }
+  s.pcNext = slot.predTarget;
+  slot.row = s.trace.length;
+  s.trace.push({ id: slot.id, pc: ins.pc, line: ins.line, text: ins.text, cells: {}, killed: false });
+  return slot;
+}
+
+/* youngest producer of rs among the stages ahead, or null */
+function phProducer(slot, rs, ahead) {
+  var k;
+  for (k = 0; k < ahead.length; k++) {
+    var p = ahead[k].slot;
+    if (p && !p.killed && p.writesRd && p.rd === rs && p.rd !== 0) {
+      return { slot: p, stage: ahead[k].stage };
+    }
+  }
+  return null;
+}
+
+/* ID-stage hazard check. ahead = [{stage:'EX',slot:oEX},{stage:'MEM',slot:oMEM},{stage:'WB',slot:oWB}] */
+function phDetect(s, idSlot, ahead) {
+  var r;
+  for (r = 0; r < idSlot.rs.length; r++) {
+    var rs = idSlot.rs[r];
+    if (rs === 0) continue;
+    var pr = phProducer(idSlot, rs, ahead);
+    if (!pr) continue;
+    if (s.fwd) {
+      if (pr.stage === "EX" && pr.slot.isLoad) {
+        return { kind: "load-use", rs: rs, producer: pr.slot };
+      }
+    } else {
+      if (pr.stage === "EX" || pr.stage === "MEM") {
+        return { kind: "raw", rs: rs, producer: pr.slot };
+      }
+    }
+  }
+  return null;
+}
+
+/* resolve one operand inside EX, applying forwarding muxes */
+function phOpVal(s, slot, rs, oMEM, oWB, ev) {
+  if (rs <= 0) return 0;
+  var pr = phProducer(slot, rs, [{ stage: "EX", slot: oMEM }, { stage: "WB", slot: oWB }]);
+  if (pr && s.fwd) {
+    s.forwards++;
+    ev.push({ t: "fwd", from: pr.stage, rs: rs, id: slot.id, pc: slot.pc });
+    return pr.slot.res | 0;
+  }
+  return s.regs[rs] | 0;
+}
+
+function phTrap(s, msg) {
+  s.done = true;
+  s.trap = msg;
+  return [];
+}
+
+function phStep(s) {
+  var ev = [];
+  s.lastEvents = ev;
+  s.bubbleEX = false;
+  if (s.done) return ev;
+  var oIF = s.pipe[0], oID = s.pipe[1], oEX = s.pipe[2], oMEM = s.pipe[3], oWB = s.pipe[4];
+  var cycle = s.cycle;
+  var STAGE = ["IF", "ID", "EX", "MEM", "WB"];
+
+  /* 1. WB: retire */
+  if (oWB && !oWB.killed) {
+    if (oWB.writesRd && oWB.rd !== 0) s.regs[oWB.rd] = oWB.res | 0;
+    s.retired++;
+  }
+  /* 2. MEM -> WB */
+  var newWB = null;
+  if (oMEM && !oMEM.killed) {
+    if (oMEM.isLoad) {
+      var la = oMEM.res | 0;
+      if (la % 4 !== 0 || la < 0 || la >= PH_MEM_WORDS * 4) return phTrap(s, "load address fault at 0x" + ((la >>> 0).toString(16)));
+      oMEM.res = s.mem[la >> 2] | 0;
+    } else if (oMEM.isStore) {
+      var sa = oMEM.res | 0;
+      if (sa % 4 !== 0 || sa < 0 || sa >= PH_MEM_WORDS * 4) return phTrap(s, "store address fault at 0x" + ((sa >>> 0).toString(16)));
+      s.mem[sa >> 2] = oMEM.sdata | 0;
+    }
+    newWB = oMEM;
+  }
+  /* 3. EX -> MEM, with branch/jump resolution */
+  var newMEM = null, flush = false, flushTarget = 0;
+  if (oEX && !oEX.killed) {
+    var v1 = phOpVal(s, oEX, oEX.rs1, oMEM, oWB, ev);
+    var v2 = oEX.usesRs2 ? phOpVal(s, oEX, oEX.rs2, oMEM, oWB, ev) : 0;
+    var op = oEX.op, res = 0;
+    if (op === "add") res = (v1 + v2) | 0;
+    else if (op === "sub") res = (v1 - v2) | 0;
+    else if (op === "and") res = (v1 & v2) | 0;
+    else if (op === "or") res = (v1 | v2) | 0;
+    else if (op === "xor") res = (v1 ^ v2) | 0;
+    else if (op === "sll") res = (v1 << (v2 & 31)) | 0;
+    else if (op === "srl") res = (v1 >>> (v2 & 31)) | 0;
+    else if (op === "addi") res = (v1 + oEX.imm) | 0;
+    else if (op === "andi") res = (v1 & oEX.imm) | 0;
+    else if (op === "ori") res = (v1 | oEX.imm) | 0;
+    else if (op === "xori") res = (v1 ^ oEX.imm) | 0;
+    else if (op === "slli") res = (v1 << (oEX.imm & 31)) | 0;
+    else if (op === "srli") res = (v1 >>> (oEX.imm & 31)) | 0;
+    else if (op === "lw" || op === "sw") {
+      res = (v1 + oEX.imm) | 0;
+      if (oEX.isStore) oEX.sdata = v2 | 0;
+    } else if (op === "jal") {
+      res = (oEX.pc + 4) | 0;
+    }
+    oEX.res = res;
+    if (oEX.isBranch) {
+      var taken;
+      if (op === "beq") taken = (v1 === v2);
+      else if (op === "bne") taken = (v1 !== v2);
+      else if (op === "blt") taken = (v1 < v2);
+      else taken = (v1 >= v2);
+      s.preds++;
+      if (s.predictor === "2bit") {
+        var ctr = s.bht[oEX.pc] === undefined ? 1 : s.bht[oEX.pc];
+        if (taken === oEX.predTaken) s.predHit++;
+        s.bht[oEX.pc] = taken ? Math.min(3, ctr + 1) : Math.max(0, ctr - 1);
+      } else if (taken === oEX.predTaken) s.predHit++;
+      if (taken !== oEX.predTaken) {
+        flush = true;
+        flushTarget = taken ? oEX.target : oEX.pc + 4;
+        s.controlStalls += 2;
+        phBlame(s, oEX.pc, "control");
+        ev.push({ t: "mispredict", id: oEX.id, pc: oEX.pc, taken: taken });
+      }
+    } else if (oEX.isJump) {
+      flush = true;
+      flushTarget = oEX.target;
+      s.controlStalls += 2;
+      phBlame(s, oEX.pc, "control");
+      ev.push({ t: "jump", id: oEX.id, pc: oEX.pc });
+    }
+    newMEM = oEX;
+  }
+  /* 4+5. ID and IF */
+  var newEX = null, newID = null, newIF = null;
+  function kill(slot) {
+    if (slot && !slot.killed) {
+      slot.killed = true;
+      slot.killCycle = cycle;
+      s.trace[slot.row].killed = true;
+    }
+  }
+  if (flush) {
+    kill(oIF); kill(oID);
+    s.pcNext = flushTarget;
+  } else if (oID && !oID.killed) {
+    var hz = phDetect(s, oID, [
+      { stage: "EX", slot: oEX },
+      { stage: "MEM", slot: oMEM },
+      { stage: "WB", slot: oWB }
+    ]);
+    if (hz) {
+      newEX = null;
+      s.bubbleEX = true;
+      newID = oID;
+      newIF = oIF;
+      s.dataStalls++;
+      phBlame(s, oID.pc, "data");
+      ev.push({ t: "stall", kind: hz.kind, rs: hz.rs, id: oID.id, pc: oID.pc, prodPc: hz.producer.pc });
+    } else {
+      newEX = oID;
+      newID = (oIF && !oIF.killed) ? oIF : null;
+      newIF = (s.pcNext < s.instrs.length * 4) ? phFetch(s) : null;
+    }
+  } else {
+    newID = (oIF && !oIF.killed) ? oIF : null;
+    newIF = (s.pcNext < s.instrs.length * 4) ? phFetch(s) : null;
+  }
+
+  s.pipe = [newIF, newID, newEX, newMEM, newWB];
+  var si;
+  for (si = 0; si < 5; si++) {
+    var sl = s.pipe[si];
+    if (sl && !sl.killed) s.trace[sl.row].cells[cycle] = STAGE[si];
+  }
+  s.cycle++;
+  if (s.pcNext >= s.instrs.length * 4 &&
+      !s.pipe[0] && !s.pipe[1] && !s.pipe[2] && !s.pipe[3] && !s.pipe[4]) {
+    s.done = true;
+  }
+  return ev;
+}
+
+function phRun(s, maxCycles) {
+  var n = maxCycles || 20000;
+  while (!s.done && s.cycle < n) phStep(s);
+  if (!s.done) { s.done = true; s.trap = "runaway: exceeded " + n + " cycles"; }
+  return s;
+}
+/* PH-SIM-END */
+
+/* PH-SIM-END */
+
+/* ---------- trials (pure data) ---------- */
+var PH_TRIALS = [
+  {
+    id: "t1", name: "Trial 1: The Slow Loop",
+    brief: "Eight words, one sum, too many stalls. The loop as written burns a load-use stall every lap, and the predictor is stuck on always-not-taken. Reorder the loop to hide the load behind independent work, pick a predictor that learns, and finish at or under <b>56 cycles</b> with a0 = 36. <span class=\"par\">Shop par: 54 cycles.</span>",
+    hint: "Two independent instructions fit between the load and its use. The loop branch is taken almost every time.",
+    program: "  addi t0, x0, 8\n  addi t1, x0, 0\nloop:\n  lw   t3, 0(t2)\n  add  t1, t1, t3\n  addi t2, t2, 4\n  addi t0, t0, -1\n  bne  t0, x0, loop\n  add  a0, x0, t1",
+    memInit: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8 },
+    checks: [{ reg: "a0", val: 36 }],
+    minRetired: 35, par: 54, budget: 56,
+    startFwd: true, startPred: "nt"
+  },
+  {
+    id: "t2", name: "Trial 2: Two Branches, One Predictor",
+    brief: "One branch is taken 15 times out of 20, the other 19 out of 20. No static predictor gets both right, and every wrong guess flushes two fresh instructions down the drain. The two-bit predictor learns each branch on its own. Finish at or under <b>205 cycles</b> with a0 = 20 and a1 = 50. <span class=\"par\">Shop par: 196 cycles.</span>",
+    hint: "Static always-taken aces the loop branch but bombs the skip. Static always-not-taken does the reverse. Only the adaptive predictor gets both.",
+    program: "  addi t0, x0, 20\n  addi t1, x0, 0\n  addi t2, x0, 0\nloop:\n  addi t1, t1, 1\n  andi t3, t1, 3\n  beq  t3, x0, skip\n  jal  x0, cont\nskip:\n  addi t2, t2, 10\ncont:\n  addi t0, t0, -1\n  bne  t0, x0, loop\n  add  a0, x0, t1\n  add  a1, x0, t2",
+    memInit: null,
+    checks: [{ reg: "a0", val: 20 }, { reg: "a1", val: 50 }],
+    minRetired: 100, par: 196, budget: 205,
+    startFwd: true, startPred: "nt"
+  },
+  {
+    id: "t3", name: "Trial 3: Forward Frenzy",
+    brief: "Five instructions, every one chained on the last, and the forwarding unit is switched off. The pipe stalls on every link while results crawl to writeback. Flip forwarding on and watch the stalls vanish. Finish at or under <b>12 cycles</b> with a0 = 80. <span class=\"par\">Shop par: 10 cycles.</span>",
+    hint: "Forwarding routes each ALU result straight back to the next instruction. No code change needed, this one is pure hardware.",
+    program: "  addi t0, x0, 5\n  add  t1, t0, t0\n  add  t2, t1, t1\n  add  t3, t2, t2\n  add  a0, t3, t3",
+    memInit: null,
+    checks: [{ reg: "a0", val: 80 }],
+    minRetired: 5, par: 10, budget: 12,
+    startFwd: false, startPred: "2bit"
+  }
+];
+
+var PH_DEMO = "# Demo: a counting loop fed by forwarded ALU results.\n# Edit me, then press Apply and Reset.\n  li   t0, 5\n  li   t1, 0\nloop:\n  add  t1, t1, t0\n  addi t0, t0, -1\n  bne  t0, x0, loop\n  mv   a0, t1        # a0 = 15";
+
+var PH_PRED_NAMES = { nt: "Always not-taken", t: "Always taken", "2bit": "2-bit adaptive" };
+
+/* ---------- UI state ---------- */
+var phUI = null;
+
+function phLoadStamps() {
+  try {
+    var raw = window.localStorage.getItem("ph-trial-stamps");
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+function phSaveStamps(st) {
+  try { window.localStorage.setItem("ph-trial-stamps", JSON.stringify(st)); } catch (e) {}
+}
+
+function phBuild() {
+  if (phUI) return phUI;
+  var st = document.createElement("style");
+  st.textContent = PH_CSS;
+  document.head.appendChild(st);
+
+  var box = document.querySelector(".dossier .actions");
+  var ui = {
+    sim: null, instrs: null, timer: null, running: false,
+    mode: "free", trialIdx: -1,
+    stamps: phLoadStamps(),
+    memInit: null, tick: 0
+  };
+  phUI = ui;
+
+  if (box && !ph$("phBtn")) {
+    var b = phEl("button", "secondary", "Run the Pipeline Hazard Lab");
+    b.id = "phBtn";
+    b.addEventListener("click", function () { ph$("phOverlay").classList.add("open"); });
+    box.appendChild(b);
+  }
+
+  var ov = phEl("div", "ph-overlay");
+  ov.id = "phOverlay";
+  var panel = phEl("div", "ph-panel");
+  panel.innerHTML =
+    "<h3>The Pipeline Hazard Lab</h3>" +
+    '<p class="ph-sub">The Silicon Anvil proved the core computes. This bench proves it computes <b>fast</b>: a classic five-stage RV32I pipeline with real forwarding, real load-use and control stalls, and a branch predictor you can swap mid-shift. Built for the RISC-V bench behind the <a href="https://dillingerstaffing.github.io/portfolio/" target="_blank" rel="noopener">freelance portfolio</a>: every cycle here is the same machinery a client pays for.</p>';
+  ov.appendChild(panel);
+  document.body.appendChild(ov);
+
+  /* tabs */
+  var tabs = phEl("div", "ph-tabs");
+  ui.tabBtns = [];
+  ["Free Bench", "Trial 1: The Slow Loop", "Trial 2: Two Branches", "Trial 3: Forward Frenzy"].forEach(function (label, i) {
+    var tb = phEl("button", "ph-tab" + (i === 0 ? " on" : ""), phEsc(label));
+    tb.addEventListener("click", function () { phSelectMode(i === 0 ? -1 : i - 1); });
+    tabs.appendChild(tb);
+    ui.tabBtns.push(tb);
+  });
+  panel.appendChild(tabs);
+
+  ui.brief = phEl("div", "ph-brief", "");
+  panel.appendChild(ui.brief);
+
+  /* toolbar */
+  var bar = phEl("div", "ph-toolbar");
+  ui.runBtn = phEl("button", "secondary", "Run");
+  ui.runBtn.addEventListener("click", phToggleRun);
+  bar.appendChild(ui.runBtn);
+  ui.stepBtn = phEl("button", "secondary", "Step 1 cycle");
+  ui.stepBtn.addEventListener("click", function () { phStopRun(); phStepOnce(); });
+  bar.appendChild(ui.stepBtn);
+  ui.resetBtn = phEl("button", "secondary", "Reset");
+  ui.resetBtn.addEventListener("click", function () { phStopRun(); phResetSim(); phToast("Pipeline reset"); });
+  bar.appendChild(ui.resetBtn);
+
+  bar.appendChild(phEl("span", "lbl", "Speed"));
+  ui.speed = phEl("select", null, "");
+  [["1", "1x"], ["4", "4x"], ["16", "16x"]].forEach(function (o) {
+    var op = phEl("option", null, o[1]);
+    op.value = o[0];
+    ui.speed.appendChild(op);
+  });
+  ui.speed.value = "4";
+  bar.appendChild(ui.speed);
+
+  bar.appendChild(phEl("span", "lbl", "Forwarding"));
+  ui.fwdBtn = phEl("button", "secondary", "ON");
+  ui.fwdBtn.addEventListener("click", function () {
+    ui.fwdOn = !ui.fwdOn;
+    ui.fwdBtn.textContent = ui.fwdOn ? "ON" : "OFF";
+    phStopRun(); phResetSim();
+    phToast("Forwarding " + (ui.fwdOn ? "enabled" : "disabled") + ", pipeline reset");
+  });
+  bar.appendChild(ui.fwdBtn);
+
+  bar.appendChild(phEl("span", "lbl", "Predictor"));
+  ui.pred = phEl("select", null, "");
+  Object.keys(PH_PRED_NAMES).forEach(function (k) {
+    var op = phEl("option", null, PH_PRED_NAMES[k]);
+    op.value = k;
+    ui.pred.appendChild(op);
+  });
+  ui.pred.value = "2bit";
+  ui.pred.addEventListener("change", function () { phStopRun(); phResetSim(); phToast("Predictor: " + PH_PRED_NAMES[ui.pred.value]); });
+  bar.appendChild(ui.pred);
+
+  ui.trialBtn = phEl("button", "primary", "Run trial to completion");
+  ui.trialBtn.style.display = "none";
+  ui.trialBtn.addEventListener("click", phRunTrial);
+  bar.appendChild(ui.trialBtn);
+  panel.appendChild(bar);
+
+  ui.banner = phEl("div", "ph-banner", "<h4></h4><p></p>");
+  panel.appendChild(ui.banner);
+
+  /* main grid */
+  var main = phEl("div", "ph-main");
+  var left = phEl("div", "ph-left");
+  var edhead = phEl("div", "ph-edhead", "<h4>Program</h4>");
+  ui.applyBtn = phEl("button", "secondary", "Apply and Reset");
+  ui.applyBtn.addEventListener("click", function () { phStopRun(); phApplyEditor(); });
+  edhead.appendChild(ui.applyBtn);
+  left.appendChild(edhead);
+  var edwrap = phEl("div", "ph-edwrap");
+  ui.gutter = phEl("div", "ph-gutter", "");
+  edwrap.appendChild(ui.gutter);
+  ui.ed = phEl("textarea", "ph-ed", "");
+  ui.ed.id = "phEd";
+  ui.ed.spellcheck = false;
+  ui.ed.value = PH_DEMO;
+  ui.ed.addEventListener("scroll", function () { ui.gutter.scrollTop = ui.ed.scrollTop; });
+  edwrap.appendChild(ui.ed);
+  left.appendChild(edwrap);
+  ui.errors = phEl("div", "ph-errors", "");
+  left.appendChild(ui.errors);
+  ui.blame = phEl("div", "ph-blame", "");
+  left.appendChild(ui.blame);
+  main.appendChild(left);
+
+  var right = phEl("div", "ph-righth");
+  right.appendChild(phEl("h4", null, "Pipeline, this cycle"));
+  ui.strip = phEl("div", "ph-strip", "");
+  right.appendChild(ui.strip);
+  right.appendChild(phEl("h4", null, "Cycle trace"));
+  var twrap = phEl("div", "ph-tracewrap", "");
+  ui.trace = phEl("table", "ph-trace", "");
+  twrap.appendChild(ui.trace);
+  right.appendChild(twrap);
+  main.appendChild(right);
+  panel.appendChild(main);
+
+  /* stats */
+  ui.stats = phEl("div", "ph-stats", "");
+  panel.appendChild(ui.stats);
+
+  /* registers + memory */
+  var rm = phEl("div", "ph-regmem");
+  var d1 = phEl("details", null, "<summary>Register file</summary>");
+  ui.regs = phEl("div", "ph-regtable", "");
+  d1.appendChild(ui.regs);
+  rm.appendChild(d1);
+  var d2 = phEl("details", null, "<summary>Data memory (first 64 words)</summary>");
+  ui.mem = phEl("div", "ph-regtable", "");
+  d2.appendChild(ui.mem);
+  rm.appendChild(d2);
+  panel.appendChild(rm);
+
+  /* footer */
+  var foot = phEl("div", "ph-foot");
+  var dl = phEl("button", "primary", "Download profile card");
+  dl.addEventListener("click", phDownload);
+  foot.appendChild(dl);
+  var close = phEl("button", "secondary", "Close");
+  close.addEventListener("click", function () { phStopRun(); ph$("phOverlay").classList.remove("open"); });
+  foot.appendChild(close);
+  panel.appendChild(foot);
+
+  ui.fwdOn = true;
+  ui.stripStages = [];
+  var names = [["IF", "Fetch"], ["ID", "Decode"], ["EX", "Execute"], ["MEM", "Memory"], ["WB", "Writeback"]];
+  names.forEach(function (nm, si) {
+    var card = phEl("div", "ph-stage s" + si, "<h5>" + nm[0] + " &middot; " + nm[1] + "</h5>");
+    var body = phEl("div", "ph-inst", "");
+    card.appendChild(body);
+    ui.strip.appendChild(card);
+    ui.stripStages.push({ card: card, body: body });
+    if (si < 4) ui.strip.appendChild(phEl("div", "ph-arrow", "&#8594;"));
+  });
+
+  phSelectMode(-1);
+  return ui;
+}
+
+/* ---------- mode / assembly ---------- */
+function phSelectMode(trialIdx) {
+  var ui = phUI;
+  ui.trialIdx = trialIdx;
+  ui.tabBtns.forEach(function (b, i) {
+    b.classList.toggle("on", (i === 0 && trialIdx === -1) || (i - 1 === trialIdx));
+  });
+  if (trialIdx === -1) {
+    ui.brief.classList.remove("show");
+    ui.trialBtn.style.display = "none";
+    ui.memInit = null;
+    ui.ed.value = PH_DEMO;
+    ui.fwdOn = true; ui.fwdBtn.textContent = "ON";
+    ui.pred.value = "2bit";
+  } else {
+    var t = PH_TRIALS[trialIdx];
+    ui.brief.innerHTML = "<b>" + phEsc(t.name) + ".</b> " + t.brief +
+      "<br><span style=\"color:#7c8d89\">Hint: " + phEsc(t.hint) + "</span>";
+    ui.brief.classList.add("show");
+    ui.trialBtn.style.display = "";
+    ui.memInit = t.memInit;
+    ui.ed.value = t.program;
+    ui.fwdOn = t.startFwd; ui.fwdBtn.textContent = t.startFwd ? "ON" : "OFF";
+    ui.pred.value = t.startPred;
+  }
+  phStopRun();
+  phApplyEditor();
+  phRenderBrief();
+}
+
+function phRenderBrief() {
+  var ui = phUI;
+  if (ui.trialIdx === -1) return;
+  var t = PH_TRIALS[ui.trialIdx];
+  var st = ui.stamps[t.id];
+  var extra = st ? ' <span class="par">Best: ' + st.best + ' cycles' + (st.passed ? ", CLEARED" : "") + '.</span>' : "";
+  ui.brief.innerHTML = "<b>" + phEsc(t.name) + ".</b> " + t.brief + extra +
+    "<br><span style=\"color:#7c8d89\">Hint: " + phEsc(t.hint) + "</span>";
+}
+
+function phApplyEditor() {
+  var ui = phUI;
+  var a = phAssemble(ui.ed.value);
+  if (!a.ok) {
+    ui.errors.innerHTML = a.errors.map(function (e) { return "line " + e.line + ": " + phEsc(e.msg); }).join("<br>");
+    ui.errors.classList.add("show");
+    return false;
+  }
+  if (a.instrs.length === 0) {
+    ui.errors.innerHTML = "Empty program: nothing to run.";
+    ui.errors.classList.add("show");
+    return false;
+  }
+  ui.errors.classList.remove("show");
+  ui.instrs = a.instrs;
+  phResetSim();
+  return true;
+}
+
+function phResetSim() {
+  var ui = phUI;
+  if (!ui.instrs) return;
+  ui.sim = phNewSim(ui.instrs, { fwd: ui.fwdOn, predictor: ui.pred.value, memInit: ui.memInit });
+  ui.tick = 0;
+  phHideBanner();
+  phRenderAll();
+}
+
+function phHideBanner() {
+  var ui = phUI;
+  ui.banner.classList.remove("show", "fail");
+}
+
+/* ---------- stepping / running ---------- */
+function phStepOnce() {
+  var ui = phUI;
+  if (!ui.sim || ui.sim.done) return;
+  var ev = phStep(ui.sim);
+  ui.tick++;
+  ev.forEach(function (e) {
+    if (e.t === "mispredict") {
+      phToast("Branch mispredict at 0x" + e.pc.toString(16) + ": two instructions flushed");
+      ui.stripStages.forEach(function (s) { s.card.classList.add("flushed"); });
+      setTimeout(function () { ui.stripStages.forEach(function (s) { s.card.classList.remove("flushed"); }); }, 600);
+    } else if (e.t === "stall" && e.kind === "load-use") {
+      /* quiet: the strip shows it */
+    }
+  });
+  if (ui.sim.done) {
+    phStopRun();
+    if (ui.sim.trap) phToast("Trap: " + ui.sim.trap);
+    else phToast("Halted after " + ui.sim.cycle + " cycles, " + ui.sim.retired + " retired");
+  }
+  phRenderAll();
+}
+
+function phToggleRun() {
+  var ui = phUI;
+  if (ui.running) { phStopRun(); return; }
+  if (!ui.sim || ui.sim.done) { if (!phApplyEditor()) return; }
+  ui.running = true;
+  ui.runBtn.textContent = "Pause";
+  var speed = parseInt(ui.speed.value, 10) || 1;
+  ui.timer = setInterval(function () {
+    var k;
+    for (k = 0; k < speed && ui.sim && !ui.sim.done; k++) phStep(ui.sim);
+    ui.tick++;
+    if (ui.sim.done) {
+      phStopRun();
+      if (ui.sim.trap) phToast("Trap: " + ui.sim.trap);
+      else phToast("Halted after " + ui.sim.cycle + " cycles, " + ui.sim.retired + " retired");
+    }
+    phRenderAll();
+  }, 120);
+}
+
+function phStopRun() {
+  var ui = phUI;
+  if (ui.timer) { clearInterval(ui.timer); ui.timer = null; }
+  if (ui.running) { ui.running = false; ui.runBtn.textContent = "Run"; }
+}
+
+/* ---------- rendering ---------- */
+function phRenderAll() {
+  phRenderStrip();
+  phRenderStats();
+  phRenderRegs();
+  phRenderBlame();
+  phRenderGutter();
+  if (phUI.tick % 5 === 0 || (phUI.sim && phUI.sim.done)) phRenderTrace();
+}
+
+function phRenderStrip() {
+  var ui = phUI, s = ui.sim;
+  var fwdById = {};
+  (s ? s.lastEvents : []).forEach(function (e) {
+    if (e.t === "fwd") {
+      (fwdById[e.id] = fwdById[e.id] || []).push(e);
+    }
+  });
+  ui.stripStages.forEach(function (st, si) {
+    var slot = s ? s.pipe[si] : null;
+    st.card.classList.remove("bubble");
+    if (!slot) {
+      if (si === 2 && s && s.bubbleEX) {
+        st.card.classList.add("bubble");
+        st.body.innerHTML = '<span class="inst" style="color:var(--orange)">BUBBLE<br><span style="font-size:10px">stall</span></span>';
+      } else {
+        st.body.innerHTML = '<span class="empty">--</span>';
+      }
+      return;
+    }
+    var h = phEsc(slot.text);
+    (fwdById[slot.id] || []).forEach(function (f) {
+      h += '<br><span class="ph-fwdtag">' + phEsc(phRegName(f.rs)) + " fwd from " + f.from + "</span>";
+    });
+    if (slot.killed) h = '<span style="opacity:.4;text-decoration:line-through">' + h + "</span>";
+    st.body.innerHTML = '<span class="inst">' + h + "</span>";
+  });
+}
+
+function phRenderTrace() {
+  var ui = phUI, s = ui.sim;
+  if (!s) { ui.trace.innerHTML = ""; return; }
+  var maxC = Math.max(0, s.cycle - 1);
+  var fromC = Math.max(0, maxC - 79);
+  var html = "<tr><th></th>";
+  var c;
+  for (c = fromC; c <= maxC; c++) html += "<th class=\"" + (c === maxC ? "cur" : "") + "\">" + c + "</th>";
+  html += "</tr>";
+  var STAGE_CLS = { IF: "c-IF", ID: "c-ID", EX: "c-EX", MEM: "c-MEM", WB: "c-WB" };
+  s.trace.forEach(function (row) {
+    html += '<tr class="' + (row.killed ? "killed" : "") + '"><td class="pc">' + phEsc(row.text) + "</td>";
+    for (c = fromC; c <= maxC; c++) {
+      var cell = row.cells[c];
+      if (cell) html += '<td class="' + STAGE_CLS[cell] + (c === maxC ? " cur" : "") + '">' + cell + "</td>";
+      else html += "<td" + (c === maxC ? ' class="cur"' : "") + "></td>";
+    }
+    html += "</tr>";
+  });
+  ui.trace.innerHTML = html;
+}
+
+function phRenderStats() {
+  var ui = phUI, s = ui.sim;
+  function tile(label, val, cls) {
+    return '<div class="ph-stat"><h4>' + label + "</h4><p class=\"" + (cls || "") + "\">" + val + "</p></div>";
+  }
+  if (!s) { ui.stats.innerHTML = ""; return; }
+  var ipc = s.cycle ? (s.retired / s.cycle).toFixed(2) : "0.00";
+  var acc = s.preds ? Math.round(100 * s.predHit / s.preds) + "%" : "--";
+  var h = "";
+  h += tile("Cycle", s.cycle, "");
+  h += tile("Retired", s.retired, "good");
+  h += tile("IPC", ipc, "");
+  h += tile("Data stalls", s.dataStalls, s.dataStalls ? "warn" : "");
+  h += tile("Control stalls", s.controlStalls, s.controlStalls ? "warn" : "");
+  h += tile("Forwards", s.forwards, s.forwards ? "good" : "");
+  h += tile("Predictor", s.predHit + "/" + s.preds + " " + acc, "");
+  if (s.trap) h += tile("Trap", "YES", "warn");
+  ui.stats.innerHTML = h;
+}
+
+function phRenderRegs() {
+  var ui = phUI, s = ui.sim;
+  if (!s) return;
+  var h = "";
+  var i;
+  for (i = 0; i < 32; i++) {
+    var v = s.regs[i] | 0;
+    var cls = v === 0 ? "rz" : (i >= 10 && i <= 17 ? "rhot" : "");
+    h += '<div class="' + cls + '">' + phRegName(i) + " " + phHex(v) + "</div>";
+  }
+  ui.regs.innerHTML = h;
+  h = "";
+  for (i = 0; i < 64; i++) {
+    var w = s.mem[i] | 0;
+    h += '<div class="' + (w === 0 ? "rz" : "rhot") + '">+' + (i * 4) + " " + phHex(w) + "</div>";
+  }
+  ui.mem.innerHTML = h;
+}
+
+function phPcToLine(pc) {
+  var ui = phUI;
+  if (!ui.instrs) return 0;
+  var i;
+  for (i = 0; i < ui.instrs.length; i++) if (ui.instrs[i].pc === pc) return ui.instrs[i].line;
+  return 0;
+}
+
+function phRenderBlame() {
+  var ui = phUI, s = ui.sim;
+  if (!s) { ui.blame.innerHTML = ""; return; }
+  var pcs = Object.keys(s.blame);
+  if (!pcs.length) { ui.blame.innerHTML = '<span style="color:#5f726e">No stalls yet. The pipe is clean.</span>'; return; }
+  var h = "";
+  pcs.sort(function (a, b) { return a - b; }).forEach(function (pck) {
+    var b = s.blame[pck];
+    var pc = parseInt(pck, 10);
+    var line = phPcToLine(pc);
+    var ins = ui.instrs ? ui.instrs.filter(function (x) { return x.pc === pc; })[0] : null;
+    var bits = [];
+    if (b.data) bits.push(b.data + " data");
+    if (b.control) bits.push(b.control + " control");
+    h += '<div class="brow" data-line="' + line + '"><b>0x' + pc.toString(16) + "</b> " +
+      phEsc(ins ? ins.text : "") + " &middot; " + bits.join(" + ") + " stall" + ((b.data + b.control) > 1 ? "s" : "") + "</div>";
+  });
+  ui.blame.innerHTML = h;
+  Array.prototype.forEach.call(ui.blame.querySelectorAll(".brow"), function (row) {
+    row.addEventListener("click", function () {
+      var ln = parseInt(row.getAttribute("data-line"), 10);
+      phToast("Line " + ln + ": reorder code or flip a setting to kill these stalls");
+    });
+  });
+}
+
+function phRenderGutter() {
+  var ui = phUI, s = ui.sim;
+  var n = ui.ed.value.split("\n").length;
+  var hot = {};
+  if (s) {
+    Object.keys(s.blame).forEach(function (pck) {
+      var ln = phPcToLine(parseInt(pck, 10));
+      if (ln) hot[ln] = true;
+    });
+  }
+  var h = "", i;
+  for (i = 1; i <= n; i++) h += '<div class="' + (hot[i] ? "hot" : "") + '">' + (hot[i] ? "!" : i) + "</div>";
+  ui.gutter.innerHTML = h;
+  ui.gutter.scrollTop = ui.ed.scrollTop;
+}
+
+/* ---------- trials ---------- */
+function phRunTrial() {
+  var ui = phUI;
+  var t = PH_TRIALS[ui.trialIdx];
+  if (!t) return;
+  phStopRun();
+  if (!phApplyEditor()) return;
+  var s = phNewSim(ui.instrs, { fwd: ui.fwdOn, predictor: ui.pred.value, memInit: t.memInit });
+  phRun(s, 20000);
+  ui.sim = s;
+  ui.tick++;
+  phRenderAll();
+  function fail(title, msg) {
+    ui.banner.innerHTML = "<h4>" + phEsc(title) + "</h4><p>" + msg + "</p>";
+    ui.banner.classList.add("show", "fail");
+  }
+  if (s.trap) { fail("Trial failed: trap", "The core trapped: " + phEsc(s.trap) + ". Fix the program and run the trial again."); return; }
+  var bad = null;
+  t.checks.forEach(function (ck) {
+    var got = s.regs[PH_ABI[ck.reg]] | 0;
+    if (got !== ck.val) bad = ck.reg + " = " + got + ", needed " + ck.val;
+  });
+  if (bad) { fail("Trial failed: wrong result", "The program finished but " + phEsc(bad) + ". The answer must be right, not just fast."); return; }
+  if (s.retired < t.minRetired) {
+    fail("Trial failed: too little work", "Only " + s.retired + " instructions retired. The bench requires the real program to run (at least " + t.minRetired + "). No hard-coding the answer.");
+    return;
+  }
+  if (s.cycle > t.budget) {
+    fail("Trial failed: over budget", "Finished in " + s.cycle + " cycles against a budget of " + t.budget + " (par " + t.par + "). " + phEsc(t.hint));
+    return;
+  }
+  var st = ui.stamps[t.id] || {};
+  st.passed = true;
+  st.best = st.best === undefined ? s.cycle : Math.min(st.best, s.cycle);
+  ui.stamps[t.id] = st;
+  phSaveStamps(ui.stamps);
+  var allClear = PH_TRIALS.every(function (x) { return ui.stamps[x.id] && ui.stamps[x.id].passed; });
+  var msg = "Cleared in <b>" + s.cycle + " cycles</b> (par " + t.par + ", budget " + t.budget + "), " +
+    s.dataStalls + " data stalls, " + s.controlStalls + " control stalls, " + s.forwards + " forwards. Best so far: " + st.best + ".";
+  if (allClear) msg += "<br><b>All three trials cleared. The shop names you Master Pipeline Smith.</b>";
+  ui.banner.innerHTML = "<h4>Trial cleared</h4><p>" + msg + "</p>";
+  ui.banner.classList.add("show");
+  ui.banner.classList.remove("fail");
+  phRenderBrief();
+  phToast(allClear ? "All three trials cleared. Master Pipeline Smith." : "Trial cleared in " + s.cycle + " cycles");
+}
+
+/* ---------- profile card download ---------- */
+function phDownload() {
+  var ui = phUI;
+  if (!ui.sim) { phToast("Nothing to profile yet"); return; }
+  var s = ui.sim;
+  var t = ui.trialIdx === -1 ? null : PH_TRIALS[ui.trialIdx];
+  var lines = [];
+  lines.push("PIPELINE HAZARD LAB: PROFILE CARD");
+  lines.push("Garage Inventions, " + new Date().toISOString().slice(0, 10));
+  lines.push("----------------------------------------");
+  lines.push("Mode: " + (t ? t.name : "Free Bench"));
+  lines.push("Forwarding: " + (ui.fwdOn ? "on" : "off"));
+  lines.push("Predictor: " + PH_PRED_NAMES[ui.pred.value]);
+  lines.push("");
+  lines.push("RESULT");
+  lines.push("Cycles: " + s.cycle);
+  lines.push("Retired: " + s.retired);
+  lines.push("IPC: " + (s.cycle ? (s.retired / s.cycle).toFixed(3) : "0"));
+  lines.push("Data stalls: " + s.dataStalls);
+  lines.push("Control stalls: " + s.controlStalls);
+  lines.push("Forwarded operands: " + s.forwards);
+  lines.push("Branch predictions: " + s.predHit + "/" + s.preds);
+  if (s.trap) lines.push("TRAP: " + s.trap);
+  lines.push("");
+  lines.push("STALL BLAME");
+  var pcs = Object.keys(s.blame).sort(function (a, b) { return a - b; });
+  if (!pcs.length) lines.push("(none, the pipe ran clean)");
+  pcs.forEach(function (pck) {
+    var b = s.blame[pck], pc = parseInt(pck, 10);
+    var ins = ui.instrs.filter(function (x) { return x.pc === pc; })[0];
+    lines.push("0x" + pc.toString(16) + " " + (ins ? ins.text : "") + ": " + b.data + " data, " + b.control + " control");
+  });
+  lines.push("");
+  lines.push("TRIAL STAMPS");
+  PH_TRIALS.forEach(function (x) {
+    var st = ui.stamps[x.id];
+    lines.push(x.name + ": " + (st && st.passed ? "CLEARED, best " + st.best + " cycles (par " + x.par + ")" : "not cleared"));
+  });
+  lines.push("");
+  lines.push("PROGRAM");
+  lines.push(ui.ed.value);
+  lines.push("----------------------------------------");
+  lines.push("End of profile card.");
+  var blob = new Blob([lines.join("\n")], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = (window.URL || window.webkitURL).createObjectURL(blob);
+  a.download = "pipeline-hazard-lab-profile.txt";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () {
+    (window.URL || window.webkitURL).revokeObjectURL(a.href);
+    a.remove();
+  }, 500);
+  phToast("Profile card downloaded");
+}
+
+/* ---------- init ---------- */
+function phInit() {
+  if (typeof document === "undefined") return;
+  if (!document.querySelector(".dossier .actions")) return;
+  phBuild();
+}
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", phInit);
+  } else {
+    phInit();
+  }
+}
+
+/* node test hook: harmless in the browser */
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    PH: {
+      assemble: phAssemble, newSim: phNewSim, step: phStep, run: phRun,
+      TRIALS: PH_TRIALS, ABI: PH_ABI, regName: phRegName
+    }
+  };
+}
+
+})();
