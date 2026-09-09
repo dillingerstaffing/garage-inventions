@@ -4909,6 +4909,439 @@ if (document.readyState === "loading") {
 
 })();
 
+
+/* ============================================================
+   12. THE DYNO ROOM: engine tuning bench (playable)
+   A 2.0L naturally aspirated four on the rollers. Tune
+   ignition advance, mixture, and cam timing, then run three
+   fixed trials: a peak-power pull, a torque-plateau pull, and
+   a three-pull endurance run. Too much advance or too lean a
+   mixture detonates; too much retard melts the exhaust.
+   ============================================================ */
+var DY_MBT = 27;       /* best-torque timing, deg BTDC */
+var DY_AFR0 = 12.8;    /* best-power mixture */
+var DY_TPEAK = 230;    /* peak crank torque, Nm */
+var DY_HP = 7121;      /* Nm*rpm per hp */
+
+function dyAt(adv, afr, cam, rpm) {
+  var peakRpm = 4500 + cam * 120;
+  var shape = Math.exp(-Math.pow((rpm - peakRpm) / 2300, 2));
+  var t = DY_TPEAK * (0.35 + 0.65 * shape);
+  var dafr = afr - DY_AFR0;
+  var afrEff = 1 - 0.02 * dafr * dafr;
+  if (afr > 16.5) afrEff *= 0.6;      /* lean misfire */
+  if (afr < 11) afrEff *= 0.92;       /* rich wash */
+  var advEff = adv <= DY_MBT
+    ? 1 - 0.0016 * Math.pow(DY_MBT - adv, 2)
+    : 1 - 0.002 * Math.pow(adv - DY_MBT, 2);
+  var knockLimit = DY_MBT + 5 - 1.6 * dafr - (rpm > 5500 ? 3 : 0) - (rpm > 6500 ? 2 : 0);
+  var excess = adv - knockLimit;
+  var knockPen = excess > 0 ? Math.min(0.3, 0.05 * excess) : 0;
+  var T = Math.max(0, t * Math.max(0, afrEff) * Math.max(0, advEff) * (1 - knockPen));
+  var egt = 600 + 26 * dafr + 14 * Math.max(0, DY_MBT - adv) * 0.5 +
+    (rpm / 7000) * 90 + (excess > 0 ? 40 * excess : 0);
+  return { t: T, hp: T * rpm / DY_HP, egt: egt, knock: Math.max(0, excess) };
+}
+
+var DY_TRIALS = [
+  {
+    name: "Trial 1: Peak Power",
+    desc: "One full sweep, 2000 to 7000 rpm. Make at least 190 hp at the crank. High cam timing moves the torque peak up the range; nail the advance and mixture.",
+    judge: function (s) { return s.peak >= 190; }
+  },
+  {
+    name: "Trial 2: Torque Plateau",
+    desc: "Same sweep. Average at least 205 Nm between 3000 and 5500 rpm. Fat midrange wants the cam centered and the tune right on the edge of best torque.",
+    judge: function (s) { return s.avgT >= 205; }
+  },
+  {
+    name: "Trial 3: Endurance",
+    desc: "Three back-to-back pulls. Every pull must clear 155 hp, exhaust temp must stay under 850 C, and there must be zero knock events. Calm tunes survive.",
+    judge: function (s) { return s.peak >= 155 && s.maxEGT < 850 && s.knocks === 0; }
+  }
+];
+
+var dys = null;
+
+function dyBuild() {
+  var box = document.querySelector(".dossier .actions");
+  if (!box || $("dyBtn")) return;
+
+  var css = [
+    ".dy-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+    ".dy-overlay.open{display:flex;}",
+    ".dy-panel{width:min(880px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--acid);padding:16px;}",
+    ".dy-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+    ".dy-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+    ".dy-sliders{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}",
+    ".dy-ctl{border:1px solid var(--line);background:var(--panel-2);padding:10px 12px;}",
+    ".dy-ctl h6{margin:0 0 6px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-weight:600;}",
+    ".dy-ctl .val{font-family:monospace;font-size:13px;color:var(--ink);margin-bottom:6px;}",
+    ".dy-ctl input[type=range]{width:100%;min-height:44px;accent-color:var(--acid);}",
+    ".dy-trials{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".dy-trial{border:1px solid var(--line);padding:10px;background:var(--panel-2);display:flex;flex-direction:column;gap:8px;min-width:0;}",
+    ".dy-trial h5{margin:0;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--cyan);}",
+    ".dy-trial p{margin:0;font-size:11px;color:var(--ink);line-height:1.6;flex:1;}",
+    ".dy-trial .badge{font-family:monospace;font-size:11px;padding:4px 8px;border:1px solid var(--line);color:#72827f;text-align:center;}",
+    ".dy-trial .badge.pass{border-color:var(--acid);color:var(--acid);}",
+    ".dy-trial .badge.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".dy-trial button{min-height:46px;padding:10px 6px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;background:#0a1416;border:1px solid var(--orange);color:var(--orange);}",
+    ".dy-trial button:disabled{opacity:.35;cursor:default;}",
+    ".dy-stage{border:1px solid var(--line);background:#060b0c;margin-bottom:10px;}",
+    ".dy-stage canvas{display:block;width:100%;height:250px;}",
+    ".dy-tel{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+    ".dy-tel .t{border:1px solid var(--line);padding:6px 10px;background:var(--panel-2);}",
+    ".dy-tel .t h6{margin:0 0 2px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+    ".dy-tel .t p{margin:0;font-family:monospace;font-size:13px;color:var(--ink);}",
+    ".dy-tel .t p.warn{color:var(--orange);}",
+    ".dy-tel .t p.bad{color:#ff8ba0;}",
+    ".dy-result{padding:10px 12px;font-size:13px;font-family:monospace;border:1px solid var(--line);min-height:20px;line-height:1.6;margin-bottom:10px;}",
+    ".dy-result.win{border-color:var(--acid);color:var(--acid);}",
+    ".dy-result.fail{border-color:#ff4668;color:#ff8ba0;}",
+    ".dy-foot{display:flex;gap:8px;flex-wrap:wrap;}",
+    ".dy-foot .secondary{flex:1;min-height:44px;}",
+    "@media (max-width:640px){.dy-sliders{grid-template-columns:1fr;}.dy-trials{grid-template-columns:1fr;}.dy-tel{grid-template-columns:repeat(2,minmax(0,1fr));}}"
+  ].join("\n");
+  var st = document.createElement("style");
+  st.textContent = css;
+  document.head.appendChild(st);
+
+  var b = el("button", "secondary", "Open the Dyno Room");
+  b.id = "dyBtn";
+  b.addEventListener("click", function () {
+    $("dyOverlay").classList.add("open");
+    dySizeCanvas();
+    dyRefresh();
+  });
+  box.appendChild(b);
+
+  var trialsHtml = DY_TRIALS.map(function (tr, i) {
+    return '<div class="dy-trial"><h5>' + tr.name + '</h5><p>' + tr.desc + '</p>' +
+      '<div class="badge" id="dyBadge' + i + '">not run</div>' +
+      '<button id="dyRun' + i + '">Run trial</button></div>';
+  }).join("");
+
+  var ov = el("div", "dy-overlay");
+  ov.id = "dyOverlay";
+  ov.innerHTML =
+    '<div class="dy-panel" role="dialog" aria-label="The Dyno Room engine tuning bench">' +
+    "<h3>The Dyno Room</h3>" +
+    '<p class="dy-sub">A 2.0L naturally aspirated four strapped to the rollers. Tune the ignition, the mixture, and the cam, then run three trials. Best torque timing is 27 deg; best power mixture is 12.8. Everything else is a trade.</p>' +
+    '<div class="dy-sliders">' +
+    '<div class="dy-ctl"><h6>Ignition advance</h6><div class="val" id="dyAdvVal"></div>' +
+    '<input type="range" id="dyAdv" min="0" max="40" step="0.5" value="18" aria-label="Ignition advance"></div>' +
+    '<div class="dy-ctl"><h6>Mixture (AFR)</h6><div class="val" id="dyAfrVal"></div>' +
+    '<input type="range" id="dyAfr" min="10" max="18" step="0.1" value="14.5" aria-label="Air fuel ratio"></div>' +
+    '<div class="dy-ctl"><h6>Cam timing</h6><div class="val" id="dyCamVal"></div>' +
+    '<input type="range" id="dyCam" min="-12" max="12" step="1" value="-4" aria-label="Cam timing"></div>' +
+    '<div class="dy-ctl"><h6>Live RPM (dyno readout)</h6><div class="val" id="dyRpmVal"></div>' +
+    '<input type="range" id="dyRpm" min="2000" max="7000" step="100" value="4000" aria-label="Live RPM"></div>' +
+    "</div>" +
+    '<div class="dy-trials">' + trialsHtml + "</div>" +
+    '<div class="dy-stage"><canvas id="dyCanvas"></canvas></div>' +
+    '<div class="dy-tel">' +
+    '<div class="t"><h6>Power</h6><p id="dyHp">--</p></div>' +
+    '<div class="t"><h6>Torque</h6><p id="dyTq">--</p></div>' +
+    '<div class="t"><h6>Exhaust temp</h6><p id="dyEgt">--</p></div>' +
+    '<div class="t"><h6>Knock</h6><p id="dyKnock">--</p></div>' +
+    "</div>" +
+    '<div class="dy-result" id="dyResult">Set your tune, then run a trial. The rollers do not care about your intentions.</div>' +
+    '<div class="dy-foot">' +
+    '<button class="secondary" id="dyCertBtn" disabled>Download dyno sheet</button>' +
+    '<button class="secondary" id="dyClose">Close the dyno room</button>' +
+    "</div></div>";
+  document.body.appendChild(ov);
+
+  dys = {
+    adv: 18, afr: 14.5, cam: -4, rpm: 4000,
+    running: false, anim: null, sweepRpm: null, sweepMax: 7000,
+    passed: [false, false, false], setups: [null, null, null], pull: 0
+  };
+
+  ["dyAdv", "dyAfr", "dyCam", "dyRpm"].forEach(function (id, i) {
+    $(id).addEventListener("input", function (e) {
+      var v = parseFloat(e.target.value);
+      if (i === 0) dys.adv = v; else if (i === 1) dys.afr = v;
+      else if (i === 2) dys.cam = v; else dys.rpm = v;
+      dyRefresh();
+    });
+  });
+
+  for (var i = 0; i < 3; i++) {
+    (function (ti) {
+      $("dyRun" + ti).addEventListener("click", function () { dyRunTrial(ti); });
+    })(i);
+  }
+
+  $("dyClose").addEventListener("click", function () {
+    if (dys.anim) { cancelAnimationFrame(dys.anim); dys.anim = null; }
+    dys.running = false;
+    dys.sweepRpm = null;
+    $("dyOverlay").classList.remove("open");
+  });
+  $("dyCertBtn").addEventListener("click", dyCertificate);
+}
+
+function dySizeCanvas() {
+  var c = $("dyCanvas");
+  if (!c) return;
+  var w = c.clientWidth || 700;
+  c.width = w;
+  c.height = 250;
+}
+
+function dyRefresh() {
+  $("dyAdvVal").textContent = dys.adv.toFixed(1) + " deg BTDC";
+  $("dyAfrVal").textContent = dys.afr.toFixed(1) + ":1";
+  $("dyCamVal").textContent = (dys.cam > 0 ? "+" : "") + dys.cam.toFixed(0) + " deg";
+  $("dyRpmVal").textContent = Math.round(dys.rpm) + " rpm";
+  dyTelUpdate(dyAt(dys.adv, dys.afr, dys.cam, dys.rpm));
+  dyDraw(dys.rpm, -1);
+}
+
+function dyTelUpdate(r) {
+  $("dyHp").textContent = r.hp.toFixed(1) + " hp";
+  $("dyTq").textContent = Math.round(r.t) + " Nm";
+  var e = $("dyEgt");
+  e.textContent = Math.round(r.egt) + " C";
+  e.className = r.egt > 920 ? "bad" : (r.egt > 850 ? "warn" : "");
+  var k = $("dyKnock");
+  if (r.knock > 6) { k.textContent = "SEVERE"; k.className = "bad"; }
+  else if (r.knock > 2) { k.textContent = "pinging"; k.className = "warn"; }
+  else if (r.knock > 0) { k.textContent = "trace"; k.className = ""; }
+  else { k.textContent = "none"; k.className = ""; }
+}
+
+function dyDraw(rpmNow, revealRpm) {
+  var c = $("dyCanvas");
+  if (!c || !c.width) return;
+  var g = c.getContext("2d");
+  var W = c.width, H = c.height;
+  g.fillStyle = "#060b0c";
+  g.fillRect(0, 0, W, H);
+  var L = 46, R = 14, T = 14, B = 26;
+  var x0 = function (rpm) { return L + (rpm - 2000) / 5000 * (W - L - R); };
+  var yP = function (hp) { return T + (1 - hp / 230) * (H - T - B); };
+  var yT = function (tq) { return T + (1 - tq / 280) * (H - T - B); };
+
+  g.strokeStyle = "#1b2b2d";
+  g.lineWidth = 1;
+  g.fillStyle = "#7c8d89";
+  g.font = "9px monospace";
+  var r;
+  for (r = 2000; r <= 7000; r += 1000) {
+    g.beginPath(); g.moveTo(x0(r), T); g.lineTo(x0(r), H - B); g.stroke();
+    g.fillText((r / 1000) + "k", x0(r) - 6, H - 10);
+  }
+  for (var hp = 50; hp <= 200; hp += 50) {
+    g.beginPath(); g.moveTo(L, yP(hp)); g.lineTo(W - R, yP(hp)); g.stroke();
+    g.fillText(hp + " hp", 6, yP(hp) + 3);
+  }
+
+  /* full predicted curves, faint */
+  function trace(yf, col, alpha) {
+    g.strokeStyle = col;
+    g.globalAlpha = alpha;
+    g.lineWidth = 1.5;
+    g.beginPath();
+    for (var rr = 2000; rr <= 7000; rr += 100) {
+      var d = dyAt(dys.adv, dys.afr, dys.cam, rr);
+      var x = x0(rr), y = yf === "hp" ? yP(d.hp) : yT(d.t);
+      if (rr === 2000) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+    g.globalAlpha = 1;
+  }
+  trace("hp", "#39d7ff", 0.35);
+  trace("tq", "#9dff57", 0.35);
+
+  /* measured (revealed) portion, bright */
+  if (revealRpm > 2000) {
+    g.strokeStyle = "#39d7ff";
+    g.lineWidth = 2.5;
+    g.beginPath();
+    var started = false;
+    for (var m = 2000; m <= Math.min(revealRpm, 7000); m += 50) {
+      var dd = dyAt(dys.adv, dys.afr, dys.cam, m);
+      var xx = x0(m);
+      if (!started) { g.moveTo(xx, yP(dd.hp)); started = true; }
+      else g.lineTo(xx, yP(dd.hp));
+      if (dd.knock > 2) { /* knock tick */
+        g.stroke();
+        g.strokeStyle = "#ff4668";
+        g.beginPath(); g.moveTo(xx, yP(dd.hp)); g.lineTo(xx, yP(dd.hp) - 8); g.stroke();
+        g.strokeStyle = "#39d7ff";
+        g.beginPath(); g.moveTo(xx, yP(dd.hp));
+      }
+    }
+    g.stroke();
+  }
+
+  /* sweep marker */
+  var xm = x0(rpmNow);
+  g.strokeStyle = "rgba(255,255,255,.55)";
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(xm, T); g.lineTo(xm, H - B); g.stroke();
+  var now = dyAt(dys.adv, dys.afr, dys.cam, rpmNow);
+  g.fillStyle = "#39d7ff";
+  g.beginPath(); g.arc(xm, yP(now.hp), 4, 0, 7); g.fill();
+
+  g.fillStyle = "#7c8d89";
+  g.fillText("POWER (cyan)", L, T - 2);
+  g.fillStyle = "#9dff57";
+  g.fillText("TORQUE (green)", L + 110, T - 2);
+  if (dys.sweepRpm != null) {
+    g.fillStyle = "#ff8ba0";
+    g.fillText("PULL IN PROGRESS", W - 150, T - 2);
+  }
+}
+
+function dyJudgeLine(ti, s) {
+  if (ti === 0) return "Peak " + s.peak.toFixed(1) + " hp (needed 190).";
+  if (ti === 1) return "Average " + s.avgT.toFixed(1) + " Nm from 3000 to 5500 rpm (needed 205).";
+  return "Peak " + s.peak.toFixed(1) + " hp, max EGT " + Math.round(s.maxEGT) + " C, knock events " + s.knocks + ".";
+}
+
+function dyHint(ti, s) {
+  if (s.damaged) return "The engine is damaged. Back the timing off toward 27 deg and richen the mixture toward 12.8 before trying again.";
+  if (ti === 0 && s.peak < 190) return "Hint: more cam timing moves the torque peak up the revs, but only if the mixture and advance are near their best.";
+  if (ti === 1 && s.avgT < 205) return "Hint: the plateau lives in the midrange. Center the cam, run 27 deg and 12.8 AFR, and let the fat part of the curve do the work.";
+  if (ti === 2 && s.knocks > 0) return "Hint: knock kills endurance runs. Retard the advance a degree or two and add a touch of fuel.";
+  if (ti === 2 && s.maxEGT >= 850) return "Hint: the exhaust is running hot. Richen the mixture and avoid heavy retard.";
+  if (ti === 2) return "Hint: 155 hp is not much, but three clean pulls in a row is. Tune for calm, not glory.";
+  return "";
+}
+
+function dyRunTrial(ti) {
+  if (dys.running) return;
+  dys.running = true;
+  dys.pull = 0;
+  var ids = ["dyAdv", "dyAfr", "dyCam", "dyRpm"];
+  ids.forEach(function (id) { $(id).disabled = true; });
+  for (var i = 0; i < 3; i++) $("dyRun" + i).disabled = true;
+  $("dyResult").className = "dy-result";
+  var pulls = ti === 2 ? 3 : 1;
+  $("dyResult").textContent = DY_TRIALS[ti].name + ": " + (pulls > 1 ? "three pulls" : "one pull") + ", 2000 to 7000 rpm. Stand behind the barrier.";
+  var s = { peak: 0, sumT: 0, nT: 0, maxEGT: 0, knocks: 0, damaged: false };
+  var t0 = performance.now(), dur = 3.4;
+  dys.sweepRpm = 2000;
+
+  function sample(rpm) {
+    var r = dyAt(dys.adv, dys.afr, dys.cam, rpm);
+    if (r.hp > s.peak) s.peak = r.hp;
+    if (rpm >= 3000 && rpm <= 5500) { s.sumT += r.t; s.nT++; }
+    if (r.egt > s.maxEGT) s.maxEGT = r.egt;
+    if (r.knock > 2) s.knocks++;
+    if (r.knock > 6 || r.egt > 920) s.damaged = true;
+    return r;
+  }
+
+  function frame(now) {
+    var el2 = (now - t0) / 1000;
+    var rpm = 2000 + Math.min(el2 / dur, 1) * 5000;
+    dys.sweepRpm = rpm;
+    var r = sample(rpm);
+    dyTelUpdate(r);
+    dyDraw(rpm, rpm);
+    if (s.damaged) { abort(); return; }
+    if (el2 < dur) { dys.anim = requestAnimationFrame(frame); return; }
+    dys.pull++;
+    if (dys.pull < pulls) {
+      t0 = performance.now();
+      dys.sweepRpm = 2000;
+      $("dyResult").textContent = DY_TRIALS[ti].name + ": pull " + (dys.pull + 1) + " of " + pulls + ". Cool-down lap.";
+      dys.anim = requestAnimationFrame(frame);
+      return;
+    }
+    finish();
+  }
+
+  function abort() {
+    dys.running = false;
+    dys.sweepRpm = null;
+    dys.anim = null;
+    ids.forEach(function (id) { $(id).disabled = false; });
+    for (var k = 0; k < 3; k++) $("dyRun" + k).disabled = false;
+    var badge = $("dyBadge" + ti);
+    badge.textContent = "fail";
+    badge.className = "badge fail";
+    $("dyResult").className = "dy-result fail";
+    $("dyResult").textContent = DY_TRIALS[ti].name + ": FAILED. Engine damaged on the rollers. " + dyHint(ti, s);
+    dyRefresh();
+  }
+
+  function finish() {
+    dys.running = false;
+    dys.sweepRpm = null;
+    dys.anim = null;
+    ids.forEach(function (id) { $(id).disabled = false; });
+    for (var k = 0; k < 3; k++) $("dyRun" + k).disabled = false;
+    var avgT = s.nT ? s.sumT / s.nT : 0;
+    var sum = { peak: s.peak, avgT: avgT, maxEGT: s.maxEGT, knocks: s.knocks, damaged: s.damaged };
+    var ok = !s.damaged && DY_TRIALS[ti].judge(sum);
+    var badge = $("dyBadge" + ti);
+    if (ok) {
+      dys.passed[ti] = true;
+      dys.setups[ti] = { adv: dys.adv, afr: dys.afr, cam: dys.cam, peak: s.peak, avgT: avgT, maxEGT: s.maxEGT, knocks: s.knocks };
+      badge.textContent = "pass";
+      badge.className = "badge pass";
+      $("dyResult").className = "dy-result win";
+      $("dyResult").textContent = DY_TRIALS[ti].name + ": PASSED. " + dyJudgeLine(ti, sum);
+      toast(DY_TRIALS[ti].name + " passed");
+    } else {
+      badge.textContent = "fail";
+      badge.className = "badge fail";
+      $("dyResult").className = "dy-result fail";
+      $("dyResult").textContent = DY_TRIALS[ti].name + ": FAILED. " + dyJudgeLine(ti, sum) + " " + dyHint(ti, sum);
+    }
+    if (dys.passed[0] && dys.passed[1] && dys.passed[2]) {
+      $("dyCertBtn").disabled = false;
+      $("dyResult").textContent += " ALL THREE TRIALS PASSED. The dyno will sign your sheet.";
+    }
+    dyRefresh();
+  }
+
+  dys.anim = requestAnimationFrame(frame);
+}
+
+function dyCertificate() {
+  if (!(dys.passed[0] && dys.passed[1] && dys.passed[2])) return;
+  var v = (typeof currentInvention === "function") ? currentInvention() : null;
+  var nm = v ? v.name : "unnamed prototype";
+  var code = v ? v.code : "n/a";
+  var lines = dys.setups.map(function (x, i) {
+    return "  " + DY_TRIALS[i].name + ": advance " + x.adv.toFixed(1) + " deg, AFR " +
+      x.afr.toFixed(1) + ", cam " + (x.cam > 0 ? "+" : "") + x.cam.toFixed(0) +
+      " deg, peak " + x.peak.toFixed(1) + " hp, plateau " + x.avgT.toFixed(1) +
+      " Nm, max EGT " + Math.round(x.maxEGT) + " C, knock events " + x.knocks;
+  });
+  var txt =
+    "DYNO SHEET\n" +
+    "Garage Inventions Engine Tuning Bench\n" +
+    "=====================================\n" +
+    "Invention : " + nm + " (" + code + ")\n" +
+    "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+    "Engine    : 2.0L naturally aspirated four, 2000-7000 rpm sweeps\n" +
+    "Result    : ALL THREE DYNO TRIALS PASSED\n" +
+    "Winning tunes:\n" + lines.join("\n") + "\n" +
+    "\nPeak power over 190 hp, a 205 Nm midrange plateau, and three\n" +
+    "clean endurance pulls with no knock and a cool exhaust.\n" +
+    "\nSigned by the rollers. Horsepower is a receipt.\n";
+  var blob = new Blob([txt], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "dyno-sheet.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast("Dyno sheet downloaded");
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", dyBuild);
+} else {
+  dyBuild();
+}
+
 </script>
 </body>
 </html>
