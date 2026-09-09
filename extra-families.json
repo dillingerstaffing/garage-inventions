@@ -94,5 +94,21 @@
     "power": "A wall wart; the drawer itself runs on inertia.",
     "failure": "It once certified a guitar pick as a lockpick and nearly triggered a locksmith callout.",
     "transcript": "The first census logged 214 items, including a key that fits <strong>no lock on the property</strong> and three generations of phone chargers. The certificate program was the bureaucracy's proudest moment. The drawer has not been opened the same way since."
+  },
+  {
+    "names": [
+      "Screwdriver Seismograph",
+      "Drawer Tremor Archive",
+      "Vibration Ledger"
+    ],
+    "purposes": [
+      "Logs every tremor in the junk drawer and cross-references it with the household schedule.",
+      "Converts stray vibrations into a permanent paper trail nobody asked for.",
+      "Determines whether the house is settling or just judging you."
+    ],
+    "built": "Three piezo discs, a biscuit tin, and a spool of magnet wire.",
+    "power": "A 9V battery that has been in service since the previous administration.",
+    "failure": "A particularly decisive drawer slam can register as a regional earthquake.",
+    "transcript": "DAY 4: The drawer reports three tremors. Investigation reveals a cat. <strong>Conclusion: the cat is an unreliable narrator.</strong>"
   }
 ]

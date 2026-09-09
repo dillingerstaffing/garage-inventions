@@ -570,6 +570,22 @@
   "failure": "It once certified a guitar pick as a lockpick and nearly triggered a locksmith callout.",
   "transcript": "The first census logged 214 items, including a key that fits <strong>no lock on the property</strong> and three generations of phone chargers. The certificate program was the bureaucracy's proudest moment. The drawer has not been opened the same way since."
 },
+{
+  "names": [
+    "Screwdriver Seismograph",
+    "Drawer Tremor Archive",
+    "Vibration Ledger"
+  ],
+  "purposes": [
+    "Logs every tremor in the junk drawer and cross-references it with the household schedule.",
+    "Converts stray vibrations into a permanent paper trail nobody asked for.",
+    "Determines whether the house is settling or just judging you."
+  ],
+  "built": "Three piezo discs, a biscuit tin, and a spool of magnet wire.",
+  "power": "A 9V battery that has been in service since the previous administration.",
+  "failure": "A particularly decisive drawer slam can register as a regional earthquake.",
+  "transcript": "DAY 4: The drawer reports three tremors. Investigation reveals a cat. <strong>Conclusion: the cat is an unreliable narrator.</strong>"
+},
       {
         names: ["Möbius Kettle", "Yesterday Kettle", "Preemptive Teapot"],
         purposes: [
@@ -2306,6 +2322,373 @@
     document.addEventListener("DOMContentLoaded", wpBuild);
   } else {
     wpBuild();
+  }
+
+  /* ============================================================
+     9. SIGNAL LOCK: the calibration bench (oscilloscope game)
+     Real machinery: a drifting target signal wobbles across the
+     scope. Tune the bench oscillator's frequency and phase with the
+     buttons (or arrow keys) until the two traces phase-lock. Hold
+     lock at 93 percent or better for 5 seconds to earn a
+     calibration certificate. Let the timer run out and the signal
+     is lost.
+     ============================================================ */
+  var slg = null;
+  var SL_SPAN = 1.25; /* seconds of trace shown on the scope */
+
+  function slNewSignal() {
+    slg.ft = 1.5 + Math.random() * 4.0;
+    slg.fp = 1.0;
+    slg.phT = Math.random() * Math.PI * 2;
+    slg.phP = 0;
+    slg.driftTimer = 2.5 + Math.random() * 2;
+  }
+
+  function slStart() {
+    slg.running = true; slg.won = false; slg.lost = false;
+    slg.lock = 0; slg.holdT = 0; slg.timeLeft = 60;
+    slg.moves = 0; slg.t = 0;
+    slg.last = performance.now();
+    slNewSignal();
+    $("slResult").style.display = "none";
+    $("slCertBtn").disabled = true;
+    cancelAnimationFrame(slg.raf);
+    slg.raf = requestAnimationFrame(slTick);
+    slHUD();
+  }
+
+  function slOpen() {
+    var ov = $("slOverlay");
+    if (!ov) return;
+    ov.classList.add("open");
+    slStart();
+  }
+
+  function slClose() {
+    var ov = $("slOverlay");
+    if (ov) ov.classList.remove("open");
+    if (slg) { slg.running = false; cancelAnimationFrame(slg.raf); }
+  }
+
+  function slAdjustFreq(delta) {
+    if (!slg || !slg.running) return;
+    slg.fp = Math.max(0.5, Math.min(8, slg.fp + delta));
+    slg.moves++;
+    slHUD();
+  }
+
+  function slAdjustPhase(deltaDeg) {
+    if (!slg || !slg.running) return;
+    slg.phP = (slg.phP + deltaDeg * Math.PI / 180) % (Math.PI * 2);
+    slg.moves++;
+    slHUD();
+  }
+
+  function slComputeLock() {
+    var sum = 0, N = 64, i, tt, dphi;
+    for (i = 0; i < N; i++) {
+      tt = slg.t - i * 0.02;
+      dphi = 2 * Math.PI * (slg.ft - slg.fp) * tt + (slg.phT - slg.phP);
+      sum += Math.abs(Math.cos(dphi));
+    }
+    return sum / N;
+  }
+
+  function slTick(now) {
+    var c = slg;
+    if (!c.running) return;
+    var dt = Math.min(0.05, (now - c.last) / 1000);
+    c.last = now;
+    c.t += dt;
+
+    /* target drifts: frequency random walk, phase wobble */
+    c.driftTimer -= dt;
+    if (c.driftTimer <= 0) {
+      c.driftTimer = 2 + Math.random() * 2.5;
+      var jump = (Math.random() - 0.5) * 1.3;
+      c.ft = Math.max(1, Math.min(7, c.ft + jump));
+      c.phT += (Math.random() - 0.5) * 1.6;
+      if (Math.abs(jump) > 0.75 && !c.won && !c.lost) toast("Target drifted. Re-tune the bench.");
+    }
+    c.phT += 0.06 * dt;
+
+    c.lock = slComputeLock();
+    if (c.lock >= 0.93) {
+      c.holdT += dt;
+      if (c.holdT >= 5 && !c.won) { slWin(); return; }
+    } else {
+      c.holdT = Math.max(0, c.holdT - 3 * dt);
+    }
+
+    c.timeLeft -= dt;
+    if (c.timeLeft <= 0 && !c.won) { slFail(); return; }
+
+    slHUD();
+    slDraw();
+    c.raf = requestAnimationFrame(slTick);
+  }
+
+  function slWin() {
+    var c = slg;
+    c.won = true; c.running = false;
+    var v = (typeof currentInvention === "function") ? currentInvention() : null;
+    var nm = v ? v.name : "unnamed prototype";
+    window.__signalCert = "signal-locked (" + nm + ") " + new Date().toISOString().slice(0, 10);
+    $("slCertBtn").disabled = false;
+    slShowResult(true);
+    slDraw();
+    toast("SIGNAL LOCKED. The bench oscillator holds phase.");
+  }
+
+  function slFail() {
+    var c = slg;
+    c.lost = true; c.running = false; c.timeLeft = 0;
+    slShowResult(false);
+    slDraw();
+    toast("Signal lost. The trace dissolved into static.");
+  }
+
+  function slShowResult(win) {
+    var r = $("slResult");
+    r.style.display = "block";
+    r.className = "sl-result " + (win ? "win" : "lose");
+    if (win) {
+      r.innerHTML = "<strong>SIGNAL LOCKED.</strong> Five seconds of phase lock at " +
+        Math.round(slg.lock * 100) + "% coherence. " +
+        "The bench certifies this oscillator for field service.";
+    } else {
+      r.innerHTML = "<strong>SIGNAL LOST.</strong> The timer expired before a stable lock. " +
+        "Re-seat the oscillator, breathe, and try the bench again.";
+    }
+  }
+
+  function slHint() {
+    var df = slg.fp - slg.ft;
+    if (Math.abs(df) > 0.06) return df > 0 ? "FREQ HIGH, tune down" : "FREQ LOW, tune up";
+    if (slg.lock < 0.93) return "FREQ MATCHED, adjust phase";
+    return "LOCKED, hold it steady";
+  }
+
+  function slHUD() {
+    var c = slg;
+    var pct = Math.round(c.lock * 100);
+    $("slLockPct").textContent = pct + "% lock";
+    var bar = $("slLockFill");
+    bar.style.width = pct + "%";
+    bar.style.background = pct >= 93 ? "var(--acid)" : pct >= 70 ? "var(--cyan)" : "var(--orange)";
+    $("slHoldFill").style.width = Math.min(100, c.holdT / 5 * 100) + "%";
+    $("slHoldTxt").textContent = "Hold " + Math.min(5, c.holdT).toFixed(1) + "s / 5s";
+    $("slTime").textContent = Math.ceil(c.timeLeft) + "s";
+    $("slFp").textContent = c.fp.toFixed(2) + " Hz";
+    $("slPp").textContent = Math.round(c.phP * 180 / Math.PI) + " deg";
+    $("slHint").textContent = (c.won || c.lost) ? "" : slHint();
+    $("slMoves").textContent = c.moves + " tweaks";
+  }
+
+  function slDraw() {
+    var c = slg, ctx = $("slCanvas").getContext("2d");
+    var W = 720, H = 460, mid = 210, amp = 128;
+    ctx.fillStyle = "#060b0c";
+    ctx.fillRect(0, 0, W, H);
+
+    /* graticule */
+    ctx.strokeStyle = "#14201f";
+    ctx.lineWidth = 1;
+    var x, y;
+    for (x = 0; x <= W; x += 72) { ctx.beginPath(); ctx.moveTo(x, 40); ctx.lineTo(x, 380); ctx.stroke(); }
+    for (y = 40; y <= 380; y += 68) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    ctx.strokeStyle = "#22302e";
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
+
+    /* target trace (orange), player trace (cyan) */
+    var drawTrace = function (f, ph, color, width, glow) {
+      ctx.save();
+      if (glow) { ctx.shadowColor = color; ctx.shadowBlur = 14; }
+      ctx.strokeStyle = color; ctx.lineWidth = width;
+      ctx.beginPath();
+      var i, tt, px, py;
+      for (i = 0; i <= 360; i++) {
+        px = (i / 360) * W;
+        tt = c.t - SL_SPAN * (1 - i / 360);
+        py = mid - amp * Math.sin(2 * Math.PI * f * tt + ph);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+    var locked = c.lock >= 0.93;
+    drawTrace(c.ft, c.phT, "#ff6b2c", 3, false);
+    drawTrace(c.fp, c.phP, locked ? "#c7ff38" : "#58e4e8", 2, locked);
+
+    /* legend */
+    ctx.font = "600 15px monospace";
+    ctx.fillStyle = "#ff6b2c";
+    ctx.fillText("TARGET", 14, 66);
+    ctx.fillStyle = locked ? "#c7ff38" : "#58e4e8";
+    ctx.fillText("BENCH", 120, 66);
+    if (locked) {
+      ctx.fillStyle = "#c7ff38";
+      ctx.fillText("PHASE LOCK", W - 150, 66);
+    }
+
+    /* time ruler */
+    ctx.fillStyle = "#7c8d89"; ctx.font = "600 13px monospace";
+    ctx.fillText("t - " + SL_SPAN.toFixed(2) + "s", 14, 402);
+    ctx.fillText("now", W - 44, 402);
+
+    if (c.won || c.lost) {
+      ctx.fillStyle = "rgba(4,8,8,.72)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      if (c.won) {
+        ctx.fillStyle = "#c7ff38"; ctx.font = "700 84px sans-serif";
+        ctx.fillText("LOCKED", 360, 210);
+        ctx.fillStyle = "#e9f4e8"; ctx.font = "20px monospace";
+        ctx.fillText("Five seconds of phase lock.", 360, 262);
+        ctx.fillText("The oscillator is field-certified.", 360, 294);
+      } else {
+        ctx.fillStyle = "#ff4668"; ctx.font = "700 72px sans-serif";
+        ctx.fillText("LOST", 360, 210);
+        ctx.fillStyle = "#e9f4e8"; ctx.font = "20px monospace";
+        ctx.fillText("The timer expired.", 360, 262);
+        ctx.fillText("The trace dissolved into static.", 360, 294);
+      }
+      ctx.textAlign = "left";
+    }
+  }
+
+  function slCertificate() {
+    if (!slg || !slg.won) return;
+    var v = (typeof currentInvention === "function") ? currentInvention() : null;
+    var nm = v ? v.name : "unnamed prototype";
+    var code = v ? v.code : "n/a";
+    var txt =
+      "CALIBRATION CERTIFICATE\n" +
+      "Garage Inventions Signal Lock Bench\n" +
+      "================================\n" +
+      "Invention : " + nm + " (" + code + ")\n" +
+      "Date      : " + new Date().toISOString().slice(0, 10) + "\n" +
+      "Result    : PHASE LOCK HELD 5.0s\n" +
+      "Coherence : " + Math.round(slg.lock * 100) + "%\n" +
+      "Bench freq: " + slg.fp.toFixed(2) + " Hz\n" +
+      "Tweaks    : " + slg.moves + "\n" +
+      "\nCertified by the bench. Reality is optional. Utility is not.\n";
+    var blob = new Blob([txt], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "signal-lock-certificate.txt";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    toast("Calibration certificate downloaded");
+  }
+
+  function slBuild() {
+    var box = document.querySelector(".dossier .actions");
+    if (!box || $("signalLockBtn")) return;
+
+    var css = [
+      ".sl-overlay{position:fixed;inset:0;z-index:9999;background:rgba(4,8,8,.92);display:none;align-items:center;justify-content:center;padding:16px;}",
+      ".sl-overlay.open{display:flex;}",
+      ".sl-panel{width:min(760px,100%);max-height:94vh;overflow-y:auto;background:#0a1416;border:1px solid var(--cyan);padding:16px;}",
+      ".sl-panel h3{margin:0 0 4px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.02em;}",
+      ".sl-sub{font-size:11px;color:#7c8d89;margin:0 0 12px;text-transform:uppercase;letter-spacing:.1em;line-height:1.7;}",
+      ".sl-hud{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}",
+      ".sl-tile{border:1px solid var(--line);padding:8px 10px;background:var(--panel-2);}",
+      ".sl-tile h5{margin:0 0 4px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;font-weight:600;}",
+      ".sl-tile p{margin:0;font:700 17px monospace;color:var(--ink);}",
+      ".sl-meter{height:10px;background:#101716;border:1px solid var(--line);margin-top:4px;}",
+      ".sl-meter div{height:100%;width:0;background:var(--cyan);transition:width .15s;}",
+      ".sl-hint{font:600 12px monospace;color:var(--orange);text-transform:uppercase;letter-spacing:.1em;margin:2px 0 10px;min-height:16px;}",
+      "#slCanvas{width:100%;height:auto;display:block;background:#060b0c;border:1px solid var(--line);}",
+      ".sl-ctl{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;}",
+      ".sl-ctl .grp{border:1px solid var(--line);padding:8px;background:var(--panel-2);}",
+      ".sl-ctl h5{margin:0 0 6px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7c8d89;}",
+      ".sl-ctl .btns{display:grid;grid-template-columns:1fr 1fr;gap:6px;}",
+      ".sl-ctl button{min-height:48px;font:700 14px monospace;cursor:pointer;background:var(--black);border:1px solid var(--line);color:var(--ink);}",
+      ".sl-ctl button:active{border-color:var(--cyan);color:var(--cyan);}",
+      ".sl-result{display:none;margin-top:10px;padding:12px 14px;font-size:12px;line-height:1.6;border:1px solid;}",
+      ".sl-result.win{border-color:var(--acid);background:rgba(199,255,56,.06);color:var(--ink);}",
+      ".sl-result.win strong{color:var(--acid);}",
+      ".sl-result.lose{border-color:#ff4668;background:rgba(255,70,104,.06);color:var(--ink);}",
+      ".sl-result.lose strong{color:#ff4668;}",
+      ".sl-foot{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}",
+      ".sl-foot .secondary{flex:1;min-height:44px;}",
+      ".sl-foot .secondary:disabled{opacity:.35;cursor:not-allowed;}",
+      "@media (max-width:640px){.sl-hud{grid-template-columns:repeat(2,minmax(0,1fr));}.sl-ctl{grid-template-columns:1fr 1fr;}}"
+    ].join("\n");
+    var st = document.createElement("style");
+    st.textContent = css;
+    document.head.appendChild(st);
+
+    var b = el("button", "secondary", "Signal Lock Bench");
+    b.id = "signalLockBtn";
+    b.addEventListener("click", slOpen);
+    box.appendChild(b);
+
+    var ov = el("div", "sl-overlay");
+    ov.id = "slOverlay";
+    ov.innerHTML =
+      '<div class="sl-panel" role="dialog" aria-label="Signal lock calibration bench">' +
+      "<h3>Signal Lock Bench</h3>" +
+      '<p class="sl-sub">The orange target drifts. Tune the cyan bench oscillator with the buttons or arrow keys until the traces phase-lock. Hold 93% lock for 5 seconds before the timer runs out.</p>' +
+      '<div class="sl-hud">' +
+      '<div class="sl-tile"><h5>Lock</h5><p id="slLockPct">0% lock</p><div class="sl-meter"><div id="slLockFill"></div></div></div>' +
+      '<div class="sl-tile"><h5>Hold</h5><p id="slHoldTxt">Hold 0.0s / 5s</p><div class="sl-meter"><div id="slHoldFill"></div></div></div>' +
+      '<div class="sl-tile"><h5>Bench freq</h5><p id="slFp">1.00 Hz</p><p style="font-size:11px;color:#7c8d89" id="slPp">0 deg</p></div>' +
+      '<div class="sl-tile"><h5>Clock</h5><p id="slTime">60s</p><p style="font-size:11px;color:#7c8d89"><span id="slMoves">0 tweaks</span></p></div>' +
+      "</div>" +
+      '<div class="sl-hint" id="slHint"></div>' +
+      '<canvas id="slCanvas" width="720" height="460"></canvas>' +
+      '<div class="sl-ctl">' +
+      '<div class="grp"><h5>Freq coarse</h5><div class="btns">' +
+      '<button data-sl="f" data-d="-1">-1 Hz</button><button data-sl="f" data-d="1">+1 Hz</button></div></div>' +
+      '<div class="grp"><h5>Freq fine</h5><div class="btns">' +
+      '<button data-sl="f" data-d="-0.05">-0.05</button><button data-sl="f" data-d="0.05">+0.05</button></div></div>' +
+      '<div class="grp"><h5>Phase coarse</h5><div class="btns">' +
+      '<button data-sl="p" data-d="-15">-15 deg</button><button data-sl="p" data-d="15">+15 deg</button></div></div>' +
+      '<div class="grp"><h5>Phase fine</h5><div class="btns">' +
+      '<button data-sl="p" data-d="-2">-2 deg</button><button data-sl="p" data-d="2">+2 deg</button></div></div>' +
+      "</div>" +
+      '<div class="sl-result" id="slResult"></div>' +
+      '<div class="sl-foot">' +
+      '<button class="secondary" id="slNew">New signal</button>' +
+      '<button class="secondary" id="slCertBtn" disabled>Download certificate</button>' +
+      '<button class="secondary" id="slClose">Close</button>' +
+      "</div>" +
+      "</div>";
+    document.body.appendChild(ov);
+
+    slg = { raf: 0 };
+
+    var buttons = ov.querySelectorAll("[data-sl]");
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener("click", function () {
+        var kind = this.getAttribute("data-sl");
+        var d = parseFloat(this.getAttribute("data-d"));
+        if (kind === "f") slAdjustFreq(d); else slAdjustPhase(d);
+      });
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (!ov.classList.contains("open")) return;
+      var big = e.shiftKey;
+      if (e.key === "ArrowUp") { slAdjustFreq(big ? 1 : 0.05); e.preventDefault(); }
+      else if (e.key === "ArrowDown") { slAdjustFreq(big ? -1 : -0.05); e.preventDefault(); }
+      else if (e.key === "ArrowRight") { slAdjustPhase(big ? 15 : 2); e.preventDefault(); }
+      else if (e.key === "ArrowLeft") { slAdjustPhase(big ? -15 : -2); e.preventDefault(); }
+      else if (e.key === "Escape") slClose();
+    });
+
+    $("slNew").addEventListener("click", slStart);
+    $("slCertBtn").addEventListener("click", slCertificate);
+    $("slClose").addEventListener("click", slClose);
+    ov.addEventListener("click", function (e) { if (e.target === ov) slClose(); });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", slBuild);
+  } else {
+    slBuild();
   }
 
 })();
