@@ -11700,7 +11700,22 @@ function gyScoreLift(st) {
     ".ph-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}",
     ".ph-foot .secondary,.ph-foot .primary{flex:1;min-height:44px;}",
     ".ph-foot .primary{border-color:var(--acid);color:var(--acid);}",
-    "@media (max-width:900px){.ph-main{grid-template-columns:1fr;}.ph-regmem{grid-template-columns:1fr;}.ph-panel h3{font-size:20px;}}"
+    "@media (max-width:900px){",
+    ".ph-main{grid-template-columns:1fr;}",
+    ".ph-regmem{grid-template-columns:1fr;}",
+    ".ph-panel h3{font-size:20px;}",
+    ".ph-overlay{padding:10px 8px;}",
+    ".ph-panel{padding:14px;}",
+    ".ph-righth{order:-1;}",
+    ".ph-strip{flex-direction:column;align-items:stretch;overflow:visible;padding-bottom:0;}",
+    ".ph-stage{flex:none;min-width:0;min-height:0;}",
+    ".ph-arrow{transform:rotate(90deg);}",
+    ".ph-ed{font-size:16px;line-height:1.6;min-height:260px;}",
+    ".ph-gutter{font-size:16px;line-height:1.6;}",
+    ".ph-gutter div{height:25.6px;}",
+    ".ph-toolbar select{font-size:16px;}",
+    ".ph-regtable{columns:1;}",
+    "}"
   ].join("\n");
 
 /* PH-SIM-BEGIN */
@@ -12762,7 +12777,6 @@ if (typeof module !== "undefined" && module.exports) {
 }
 
 })();
-
 </script>
 </body>
 </html>
