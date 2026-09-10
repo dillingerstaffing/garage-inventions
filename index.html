@@ -465,6 +465,46 @@
   </style>
 </head>
 <body>
+<a class="retired-banner" href="https://dillingerstaffing.github.io/proving-ground/">
+  <span class="retired-banner-text">Garage Inventions is retired. The benches live on at <strong>The Proving Ground</strong></span>
+  <span class="retired-banner-cta" aria-hidden="true">Continue &rarr;</span>
+</a>
+<style>
+.retired-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  background: #ff5a1f;
+  color: #14100c;
+  padding: 12px 20px;
+  min-height: 48px;
+  text-decoration: none;
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  text-align: center;
+}
+.retired-banner:hover { background: #ff6f3a; }
+.retired-banner:focus-visible { outline: 3px solid #fff; outline-offset: -3px; }
+.retired-banner-text strong { font-weight: 700; }
+.retired-banner-cta {
+  flex-shrink: 0;
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 700;
+  border: 2px solid #14100c;
+  border-radius: 6px;
+  padding: 6px 14px;
+  white-space: nowrap;
+}
+@media (max-width: 560px) {
+  .retired-banner { font-size: 13px; gap: 10px; padding: 10px 14px; }
+  .retired-banner-cta { padding: 6px 10px; }
+}
+</style>
 <noscript><div style="max-width:720px;margin:40px auto;padding:24px;font-family:sans-serif;color:#e9f4e8;background:#101716;border:1px solid #2a3b37;border-radius:12px">
   <h1>Garage Inventions</h1>
   <p>A garage-grade idea collider: real interactive engineering toys in your browser. Tune an engine on the dyno, forge on the Silicon Anvil, lock a signal, mint blueprints. Free, no account, runs entirely on your device.</p>
