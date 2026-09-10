@@ -12725,7 +12725,7 @@ function phRunTrial() {
     var got = s.regs[PH_ABI[ck.reg]] | 0;
     if (got !== ck.val) bad = ck.reg + " = " + got + ", needed " + ck.val;
   });
-  if (bad) { fail("Trial failed: wrong result", "The program finished but " + phEsc(bad) + ". The answer must be right, not just fast."); return; }
+  if (bad) { fail("Trial failed: wrong result", "The program finished but " + phEsc(bad) + ". The answer must be correct. Speed does not count when the answer is wrong."); return; }
   if (s.retired < t.minRetired) {
     fail("Trial failed: too little work", "Only " + s.retired + " instructions retired. The bench requires the real program to run (at least " + t.minRetired + "). No hard-coding the answer.");
     return;
